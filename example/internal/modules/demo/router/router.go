@@ -2,8 +2,8 @@ package router
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/mofang-ai/mofang-go-kit/example/internal/modules/demo/apis"
-	"github.com/mofang-ai/mofang-go-kit/mid"
+	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/apis"
+	"github.com/baowk/dilu-go-kit/mid"
 )
 
 func Init(r *gin.Engine, jwtSecret string) {

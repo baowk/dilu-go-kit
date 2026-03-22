@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/mofang-ai/mofang-go-kit/resp"
+	"github.com/baowk/dilu-go-kit/resp"
 )
 
 // JWTConfig configures the JWT middleware.

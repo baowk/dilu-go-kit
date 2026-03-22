@@ -7,7 +7,7 @@ import (
 	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mofang-ai/mofang-go-kit/resp"
+	"github.com/baowk/dilu-go-kit/resp"
 	"github.com/rs/zerolog/log"
 )
 

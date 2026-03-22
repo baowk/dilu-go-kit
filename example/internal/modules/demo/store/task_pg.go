@@ -3,8 +3,8 @@ package store
 import (
 	"context"
 
-	"github.com/mofang-ai/mofang-go-kit/example/internal/modules/demo/model"
-	base "github.com/mofang-ai/mofang-go-kit/store"
+	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/model"
+	base "github.com/baowk/dilu-go-kit/store"
 	"gorm.io/gorm"
 )
 

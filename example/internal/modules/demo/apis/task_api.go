@@ -4,11 +4,11 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mofang-ai/mofang-go-kit/example/internal/modules/demo/model"
-	"github.com/mofang-ai/mofang-go-kit/example/internal/modules/demo/store"
-	"github.com/mofang-ai/mofang-go-kit/mid"
-	"github.com/mofang-ai/mofang-go-kit/resp"
-	base "github.com/mofang-ai/mofang-go-kit/store"
+	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/model"
+	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/store"
+	"github.com/baowk/dilu-go-kit/mid"
+	"github.com/baowk/dilu-go-kit/resp"
+	base "github.com/baowk/dilu-go-kit/store"
 )
 
 type TaskAPI struct{}

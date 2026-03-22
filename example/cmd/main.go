@@ -3,10 +3,10 @@ package main
 import (
 	"log"
 
-	"github.com/mofang-ai/mofang-go-kit/boot"
-	"github.com/mofang-ai/mofang-go-kit/example/internal/modules/demo/router"
-	"github.com/mofang-ai/mofang-go-kit/example/internal/modules/demo/store"
-	"github.com/mofang-ai/mofang-go-kit/mid"
+	"github.com/baowk/dilu-go-kit/boot"
+	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/router"
+	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/store"
+	"github.com/baowk/dilu-go-kit/mid"
 )
 
 func main() {

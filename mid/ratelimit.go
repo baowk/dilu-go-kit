@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/mofang-ai/mofang-go-kit/resp"
+	"github.com/baowk/dilu-go-kit/resp"
 )
 
 // RateLimit returns a simple in-memory rate limiter middleware.

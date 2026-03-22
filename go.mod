@@ -1,4 +1,4 @@
-module github.com/mofang-ai/mofang-go-kit
+module github.com/baowk/dilu-go-kit
 
 go 1.26.1
 
