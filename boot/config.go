@@ -13,11 +13,43 @@ import (
 // Config is the base service configuration. Embed it in your own config
 // struct to add service-specific fields.
 type Config struct {
-	Server   ServerConfig              `mapstructure:"server"`
-	Database map[string]DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig               `mapstructure:"redis"`
-	GRPC     GRPCConfig                `mapstructure:"grpc"`
-	Registry RegistryConfig            `mapstructure:"registry"`
+	Server      ServerConfig              `mapstructure:"server"`
+	Database    map[string]DatabaseConfig `mapstructure:"database"`
+	Redis       RedisConfig               `mapstructure:"redis"`
+	GRPC        GRPCConfig                `mapstructure:"grpc"`
+	Registry    RegistryConfig            `mapstructure:"registry"`
+	JWT         JWTConfig                 `mapstructure:"jwt"`
+	CORS        CORSConfig                `mapstructure:"cors"`
+	AccessLimit AccessLimitConfig         `mapstructure:"accessLimit"`
+	Notify      NotifyConfig              `mapstructure:"notify"`
+}
+
+// JWTConfig describes JWT authentication settings.
+type JWTConfig struct {
+	Secret  string `mapstructure:"secret"`
+	Expires int    `mapstructure:"expires"` // minutes
+	Refresh int    `mapstructure:"refresh"` // minutes, auto-refresh window
+	Issuer  string `mapstructure:"issuer"`
+	Subject string `mapstructure:"subject"`
+}
+
+// CORSConfig describes CORS settings.
+type CORSConfig struct {
+	Enable    bool     `mapstructure:"enable"`
+	Mode      string   `mapstructure:"mode"`      // "allow-all" or "whitelist"
+	Whitelist []string `mapstructure:"whitelist"`  // allowed origins
+}
+
+// AccessLimitConfig describes rate limiting.
+type AccessLimitConfig struct {
+	Enable   bool `mapstructure:"enable"`
+	Total    int  `mapstructure:"total"`    // max requests per window (default 300)
+	Duration int  `mapstructure:"duration"` // window in seconds (default 5)
+}
+
+// NotifyConfig describes the WebSocket notification target.
+type NotifyConfig struct {
+	WsURL string `mapstructure:"wsUrl"` // mf-ws internal API base URL
 }
 
 // RegistryConfig describes the service registry (etcd).

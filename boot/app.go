@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/log"
-	"github.com/baowk/dilu-go-kit/mid"
 	"github.com/baowk/dilu-go-kit/registry"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -75,8 +74,8 @@ func New(cfgPath string) (*App, error) {
 	if cfg.GRPC.Enable {
 		// gRPC server with traceId interceptors
 		app.GRPC = grpc.NewServer(
-			grpc.UnaryInterceptor(mid.GRPCUnaryServerInterceptor()),
-			grpc.StreamInterceptor(mid.GRPCStreamServerInterceptor()),
+			grpc.UnaryInterceptor(grpcUnaryServerTrace()),
+			grpc.StreamInterceptor(grpcStreamServerTrace()),
 		)
 	}
 

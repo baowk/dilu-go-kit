@@ -70,6 +70,17 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 			return
 		}
 
+		// Extract optional claims
+		if rid, ok := claims["rid"].(float64); ok {
+			c.Set("role_id", int(rid))
+		}
+		if nick, ok := claims["nick"].(string); ok {
+			c.Set("nickname", nick)
+		}
+		if mob, ok := claims["mob"].(string); ok {
+			c.Set("phone", mob)
+		}
+
 		c.Next()
 	}
 }
@@ -81,5 +92,41 @@ func GetUID(c *gin.Context) int64 {
 			return id
 		}
 	}
+	if s := c.GetHeader("a_uid"); s != "" {
+		id, _ := strconv.ParseInt(s, 10, 64)
+		return id
+	}
 	return 0
+}
+
+// GetNickname extracts the nickname from the Gin context.
+func GetNickname(c *gin.Context) string {
+	if v, ok := c.Get("nickname"); ok {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return c.GetHeader("a_nickname")
+}
+
+// GetRoleID extracts the role ID from the Gin context.
+func GetRoleID(c *gin.Context) int {
+	if v := c.GetInt("role_id"); v != 0 {
+		return v
+	}
+	if s := c.GetHeader("a_rid"); s != "" {
+		id, _ := strconv.Atoi(s)
+		return id
+	}
+	return 0
+}
+
+// GetPhone extracts the phone from the Gin context.
+func GetPhone(c *gin.Context) string {
+	if v, ok := c.Get("phone"); ok {
+		if s, ok := v.(string); ok && s != "" {
+			return s
+		}
+	}
+	return c.GetHeader("a_mobile")
 }
