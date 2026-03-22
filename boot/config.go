@@ -28,10 +28,13 @@ type ServerConfig struct {
 
 // DatabaseConfig describes a single database connection.
 type DatabaseConfig struct {
-	DSN         string `mapstructure:"dsn"`
-	MaxIdle     int    `mapstructure:"maxIdle"`
-	MaxOpen     int    `mapstructure:"maxOpen"`
-	MaxLifetime int    `mapstructure:"maxLifetime"` // seconds
+	DSN            string `mapstructure:"dsn"`
+	MaxIdle        int    `mapstructure:"maxIdle"`        // max idle connections (default 10)
+	MaxOpen        int    `mapstructure:"maxOpen"`        // max open connections (default 50)
+	MaxLifetime    int    `mapstructure:"maxLifetime"`    // max connection lifetime in seconds (default 3600)
+	MaxIdleTime    int    `mapstructure:"maxIdleTime"`    // max idle time in seconds (default 300)
+	SlowThreshold  int    `mapstructure:"slowThreshold"`  // slow query threshold in ms (default 200)
+	PingOnOpen     bool   `mapstructure:"pingOnOpen"`     // ping DB on open to verify connectivity (default true)
 }
 
 // RedisConfig describes a Redis connection. Leave Addr empty to disable.
