@@ -43,13 +43,20 @@ internal/modules/{module}/
 ## 中间件
 
 ```go
-import "github.com/baowk/dilu-go-kit/mid"
-import "github.com/baowk/dilu-go-kit/resp"
+import (
+    "github.com/baowk/dilu-go-kit/mid"
+    "github.com/baowk/dilu-go-kit/resp"
+    "github.com/baowk/dilu-go-kit/log"
+    "github.com/baowk/dilu-go-kit/notify"
+)
 
-r.Use(mid.Recovery(), mid.CORS())
-auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{Secret: "..."}))
+mid.Default(a.Gin, mid.DefaultConfig{...})  // 一行注册全部中间件
+auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{Secret: "...", HeaderUID: "a_uid"}))
 uid := mid.GetUID(c)
 resp.Ok(c, data)
+resp.Fail(c, resp.CodeUnauthorized, "未登录")
+log.InfoContext(ctx, "msg", "key", val)  // 自动带 trace_id
+notify.Send("env", payload)              // 事件推送
 resp.Fail(c, 40101, "未登录")
 resp.Page(c, list, total, page, size)
 ```
@@ -77,7 +84,11 @@ registry:
 app, _ := boot.New("resources/config.dev.yaml")
 app.Run(func(a *boot.App) error {
     store.Init(a.DB("main"))
-    a.Gin.Use(mid.Recovery(), mid.CORS())
+    mid.Default(a.Gin, mid.DefaultConfig{
+        CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
+        AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
+    })
+    notify.Init(a.Config.Notify.WsURL)
     router.Init(a.Gin)
     return nil
 })

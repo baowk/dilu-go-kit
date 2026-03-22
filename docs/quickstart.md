@@ -44,8 +44,11 @@ func main() {
     }
     app.Run(func(a *boot.App) error {
         store.Init(a.DB("main"))
-        a.Gin.Use(mid.Recovery(), mid.CORS())
-        router.Init(a.Gin, "jwt-secret")
+        mid.Default(a.Gin, mid.DefaultConfig{
+            CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
+            AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
+        })
+        router.Init(a.Gin)
         return nil
     })
 }
@@ -196,7 +199,7 @@ func (a *TaskAPI) List(c *gin.Context) {
     size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
     list, total, err := store.S().Task.List(c, base.ListOpts{Page: page, Size: size})
     if err != nil {
-        resp.Fail(c, 50001, err.Error())
+        resp.Fail(c, resp.CodeDBError, err.Error())
         return
     }
     resp.Page(c, list, total, page, size)
@@ -215,9 +218,10 @@ import (
     "my-service/internal/modules/xxx/apis"
 )
 
-func Init(r *gin.Engine, jwtSecret string) {
+func Init(r *gin.Engine) {
     api := &apis.TaskAPI{}
-    auth := r.Group("/v1/tasks").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
+    // JWT secret 从 boot.Config 读取，在 main.go 传入或从配置获取
+    auth := r.Group("/v1/tasks").Use(mid.JWT(mid.JWTConfig{Secret: "your-secret", HeaderUID: "a_uid"}))
     {
         auth.GET("", api.List)
     }

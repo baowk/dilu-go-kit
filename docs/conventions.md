@@ -124,22 +124,60 @@ size — 每页条数，默认 20，最大 500
 ## 四、中间件
 
 ```go
-import "github.com/baowk/dilu-go-kit/mid"
+import (
+    "github.com/baowk/dilu-go-kit/mid"
+    "github.com/baowk/dilu-go-kit/log"
+)
 
-// Recovery + CORS（全局）
-r.Use(mid.Recovery(), mid.CORS())
+// 方式一：一行注册全部（推荐）
+mid.Default(a.Gin, mid.DefaultConfig{
+    CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
+    AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
+})
+// 注册顺序：Trace → Recovery → ErrorHandler → Logger → CORS → RateLimit
 
-// JWT 认证（需认证的路由组）
-auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
-    Secret:    "your-secret",
-    HeaderUID: "a_uid",  // 可选：网关透传的用户 ID header
-}))
-
-// 限流（可选）
+// 方式二：单独使用
+r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id header）
+r.Use(mid.Recovery())       // panic 恢复
+r.Use(mid.ErrorHandler())   // AppError panic 捕获
+r.Use(mid.Logger())         // 请求日志（method/path/status/latency/traceId）
+r.Use(mid.CORS())           // CORS（支持 whitelist）
 r.Use(mid.RateLimit(100, time.Minute))
 
-// 获取当前用户 ID
-uid := mid.GetUID(c)
+// JWT 认证
+auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
+    Secret:    "your-secret",
+    HeaderUID: "a_uid",
+}))
+
+// 获取用户信息
+uid := mid.GetUID(c)            // int64
+nickname := mid.GetNickname(c)  // string
+roleID := mid.GetRoleID(c)     // int
+phone := mid.GetPhone(c)       // string
+
+// gRPC traceId 透传
+conn, _ := grpc.NewClient(addr, grpc.WithUnaryInterceptor(mid.GRPCUnaryClientInterceptor()))
+```
+
+### 日志
+
+```go
+import "github.com/baowk/dilu-go-kit/log"
+
+log.Info("msg", "key", value)                        // 基础
+log.InfoContext(ctx, "msg", "key", value)             // 自动带 trace_id
+log.With("module", "auth").Error("failed", "err", e) // 子 logger
+```
+
+### 事件通知
+
+```go
+import "github.com/baowk/dilu-go-kit/notify"
+
+notify.Init("http://mf-ws:9020")
+notify.Send("env", map[string]any{"action": "created", "env_id": 123})
+notify.SendContext(ctx, "proxy", payload)  // 携带 traceId
 ```
 
 ## 五、配置
@@ -171,12 +209,31 @@ grpc:
   enable: false
   addr: ":9090"
 
+jwt:
+  secret: "your-secret"
+  expires: 1440           # 过期时间，分钟
+  refresh: 30             # 自动刷新窗口，分钟
+
+cors:
+  enable: true
+  mode: allow-all         # allow-all / whitelist
+  whitelist:              # mode=whitelist 时生效
+    - "https://example.com"
+
+accessLimit:
+  enable: true
+  total: 300              # 每窗口最大请求数
+  duration: 5             # 窗口时长，秒
+
+notify:
+  wsUrl: "http://mf-ws:9020"  # WebSocket 网关通知地址
+
 registry:
-  enable: true            # 启用 etcd 服务注册
+  enable: true
   endpoints:
     - "127.0.0.1:2379"
-  prefix: "/services/"    # key 前缀（默认 /mofang/services/）
-  ttl: 30                 # 租约 TTL，秒（默认 30）
+  prefix: "/services/"
+  ttl: 30
 ```
 
 ### 扩展配置
