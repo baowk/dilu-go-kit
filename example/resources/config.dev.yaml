@@ -1,0 +1,17 @@
+server:
+  name: demo-service
+  addr: ":8080"
+  mode: debug
+
+database:
+  main:
+    dsn: "host=127.0.0.1 user=postgres dbname=demo sslmode=disable"
+    maxIdle: 10
+    maxOpen: 50
+    maxLifetime: 3600
+
+redis:
+  addr: "127.0.0.1:6379"
+
+grpc:
+  enable: false
