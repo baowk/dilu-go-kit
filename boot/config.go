@@ -17,6 +17,15 @@ type Config struct {
 	Database map[string]DatabaseConfig `mapstructure:"database"`
 	Redis    RedisConfig               `mapstructure:"redis"`
 	GRPC     GRPCConfig                `mapstructure:"grpc"`
+	Registry RegistryConfig            `mapstructure:"registry"`
+}
+
+// RegistryConfig describes the service registry (etcd).
+type RegistryConfig struct {
+	Enable    bool     `mapstructure:"enable"`
+	Endpoints []string `mapstructure:"endpoints"` // e.g. ["127.0.0.1:2379"]
+	Prefix    string   `mapstructure:"prefix"`    // default "/mofang/services/"
+	TTL       int      `mapstructure:"ttl"`       // lease TTL in seconds, default 30
 }
 
 // ServerConfig describes the HTTP server.

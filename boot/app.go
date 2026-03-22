@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/mofang-ai/mofang-go-kit/registry"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"gorm.io/gorm"
@@ -18,14 +19,16 @@ import (
 
 // App is the central service instance holding all shared resources.
 type App struct {
-	Config *Config
-	Gin    *gin.Engine
-	DBs    map[string]*gorm.DB
-	Redis  *redis.Client
-	GRPC   *grpc.Server // nil if gRPC is disabled
+	Config   *Config
+	Gin      *gin.Engine
+	DBs      map[string]*gorm.DB
+	Redis    *redis.Client
+	GRPC     *grpc.Server        // nil if gRPC is disabled
+	Registry registry.Registry   // nil if registry is disabled
 
-	onStart []func()
-	onClose []func()
+	instanceID string
+	onStart    []func()
+	onClose    []func()
 }
 
 // SetupFunc is called during Run to register routes, stores, gRPC services, etc.
@@ -72,6 +75,20 @@ func New(cfgPath string) (*App, error) {
 		app.GRPC = grpc.NewServer()
 	}
 
+	// Registry (optional)
+	if cfg.Registry.Enable && len(cfg.Registry.Endpoints) > 0 {
+		reg, err := registry.New(registry.Config{
+			Endpoints: cfg.Registry.Endpoints,
+			Prefix:    cfg.Registry.Prefix,
+			TTL:       cfg.Registry.TTL,
+		})
+		if err != nil {
+			Log().Warn().Err(err).Msg("registry init failed, running without service discovery")
+		} else {
+			app.Registry = reg
+		}
+	}
+
 	return app, nil
 }
 
@@ -105,6 +122,22 @@ func (a *App) Run(setup SetupFunc) error {
 		}()
 	}
 
+	// Register service
+	if a.Registry != nil {
+		a.instanceID = registry.GenerateInstanceID(a.Config.Server.Name)
+		svc := registry.Service{
+			Name:       a.Config.Server.Name,
+			InstanceID: a.instanceID,
+			Addr:       a.Config.Server.Addr,
+		}
+		if a.Config.GRPC.Enable {
+			svc.GRPCAddr = a.Config.GRPC.Addr
+		}
+		if err := a.Registry.Register(context.Background(), svc); err != nil {
+			Log().Error().Err(err).Msg("service registration failed")
+		}
+	}
+
 	// Start HTTP
 	srv := &http.Server{Addr: a.Config.Server.Addr, Handler: a.Gin}
 	quit := make(chan os.Signal, 1)
@@ -116,7 +149,6 @@ func (a *App) Run(setup SetupFunc) error {
 			Str("addr", a.Config.Server.Addr).
 			Msg("HTTP server started")
 
-		// OnStart callbacks
 		for _, fn := range a.onStart {
 			fn()
 		}
@@ -152,6 +184,14 @@ func (a *App) Run(setup SetupFunc) error {
 			_ = sqlDB.Close()
 			Log().Debug().Str("db", name).Msg("db closed")
 		}
+	}
+
+	// Deregister service
+	if a.Registry != nil {
+		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = a.Registry.Deregister(dctx, a.Config.Server.Name, a.instanceID)
+		_ = a.Registry.Close()
+		dcancel()
 	}
 
 	// Close Redis
