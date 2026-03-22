@@ -70,18 +70,33 @@ registry:
 
 服务启动时自动注册到 etcd，关闭时自动注销。网关可 Watch 实时发现后端服务变更。
 
-## AI 辅助开发（Claude Code）
+## AI 辅助开发
 
-本仓库提供 [CLAUDE.template.md](CLAUDE.template.md)，新项目拷贝到根目录并重命名为 `CLAUDE.md`，Claude Code 打开项目时会自动读取，遵循 dilu-go-kit 的开发规范（数据层、API 格式、中间件用法等）。
+本仓库提供 [CLAUDE.template.md](CLAUDE.template.md) 作为 AI 开发规范模板。不同 AI 工具读取不同的文件名，内容相同：
+
+| AI 工具 | 文件名 |
+|---------|--------|
+| Claude Code | `CLAUDE.md` |
+| OpenAI Codex CLI | `AGENTS.md` |
+| Cursor | `.cursorrules` |
+| Windsurf | `.windsurfrules` |
+| GitHub Copilot | `.github/copilot-instructions.md` |
+
+新项目初始化时，按需拷贝：
 
 ```bash
-# 新项目初始化时
-cp $(go env GOMODCACHE)/github.com/baowk/dilu-go-kit@*/CLAUDE.template.md ./CLAUDE.md
-# 或直接从 GitHub 下载
-curl -sL https://raw.githubusercontent.com/baowk/dilu-go-kit/main/CLAUDE.template.md > CLAUDE.md
+# 下载模板
+curl -sL https://raw.githubusercontent.com/baowk/dilu-go-kit/main/CLAUDE.template.md > CLAUDE.template.md
+
+# 按你用的 AI 工具拷贝（可以全部都拷，不冲突）
+cp CLAUDE.template.md CLAUDE.md                          # Claude Code
+cp CLAUDE.template.md AGENTS.md                          # OpenAI Codex
+cp CLAUDE.template.md .cursorrules                       # Cursor
+cp CLAUDE.template.md .windsurfrules                     # Windsurf
+mkdir -p .github && cp CLAUDE.template.md .github/copilot-instructions.md  # Copilot
 ```
 
-拷贝后按需修改项目名和结构说明即可。
+拷贝后按需修改项目名和结构说明即可。AI 打开项目时自动读取，遵循 dilu-go-kit 开发规范。
 
 ## 规范
 

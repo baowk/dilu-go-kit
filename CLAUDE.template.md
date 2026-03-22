@@ -1,4 +1,4 @@
-# [项目名] — Claude Code 项目约定
+# [项目名] — AI 开发约定
 
 > 本项目基于 [dilu-go-kit](https://github.com/baowk/dilu-go-kit) 开发，遵循其开发规范。
 
