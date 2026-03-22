@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/baowk/dilu-go-kit/log"
+	"github.com/baowk/dilu-go-kit/mid"
 	"github.com/baowk/dilu-go-kit/registry"
+	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"gorm.io/gorm"
@@ -23,8 +25,8 @@ type App struct {
 	Gin      *gin.Engine
 	DBs      map[string]*gorm.DB
 	Redis    *redis.Client
-	GRPC     *grpc.Server        // nil if gRPC is disabled
-	Registry registry.Registry   // nil if registry is disabled
+	GRPC     *grpc.Server
+	Registry registry.Registry
 
 	instanceID string
 	onStart    []func()
@@ -34,15 +36,14 @@ type App struct {
 // SetupFunc is called during Run to register routes, stores, gRPC services, etc.
 type SetupFunc func(app *App) error
 
-// New creates an App from a config file path. It initializes the logger,
-// Gin engine, database connections, and Redis (if configured).
+// New creates an App from a config file path.
 func New(cfgPath string) (*App, error) {
 	cfg, err := LoadBaseConfig(cfgPath)
 	if err != nil {
 		return nil, err
 	}
 
-	InitLogger(cfg.Server.Mode)
+	InitLogger(cfg.Server.Mode, cfg.Server.Name)
 
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -72,7 +73,11 @@ func New(cfgPath string) (*App, error) {
 	}
 
 	if cfg.GRPC.Enable {
-		app.GRPC = grpc.NewServer()
+		// gRPC server with traceId interceptors
+		app.GRPC = grpc.NewServer(
+			grpc.UnaryInterceptor(mid.GRPCUnaryServerInterceptor()),
+			grpc.StreamInterceptor(mid.GRPCStreamServerInterceptor()),
+		)
 	}
 
 	// Registry (optional)
@@ -83,7 +88,7 @@ func New(cfgPath string) (*App, error) {
 			TTL:       cfg.Registry.TTL,
 		})
 		if err != nil {
-			Log().Warn().Err(err).Msg("registry init failed, running without service discovery")
+			log.Warn("registry init failed, running without service discovery", "error", err)
 		} else {
 			app.Registry = reg
 		}
@@ -102,7 +107,7 @@ func (a *App) OnStart(fn func()) { a.onStart = append(a.onStart, fn) }
 func (a *App) OnClose(fn func()) { a.onClose = append(a.onClose, fn) }
 
 // Run starts the HTTP server (and optional gRPC server), calls setup,
-// then blocks until SIGINT/SIGTERM. Shutdown is graceful.
+// then blocks until SIGINT/SIGTERM.
 func (a *App) Run(setup SetupFunc) error {
 	if err := setup(a); err != nil {
 		return fmt.Errorf("setup: %w", err)
@@ -115,9 +120,9 @@ func (a *App) Run(setup SetupFunc) error {
 			return fmt.Errorf("grpc listen %s: %w", a.Config.GRPC.Addr, err)
 		}
 		go func() {
-			Log().Info().Str("addr", a.Config.GRPC.Addr).Msg("gRPC server started")
+			log.Info("gRPC server started", "addr", a.Config.GRPC.Addr)
 			if err := a.GRPC.Serve(lis); err != nil {
-				Log().Error().Err(err).Msg("gRPC server error")
+				log.Error("gRPC server error", "error", err)
 			}
 		}()
 	}
@@ -134,7 +139,7 @@ func (a *App) Run(setup SetupFunc) error {
 			svc.GRPCAddr = a.Config.GRPC.Addr
 		}
 		if err := a.Registry.Register(context.Background(), svc); err != nil {
-			Log().Error().Err(err).Msg("service registration failed")
+			log.Error("service registration failed", "error", err)
 		}
 	}
 
@@ -144,49 +149,41 @@ func (a *App) Run(setup SetupFunc) error {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		Log().Info().
-			Str("name", a.Config.Server.Name).
-			Str("addr", a.Config.Server.Addr).
-			Msg("HTTP server started")
+		log.Info("HTTP server started", "name", a.Config.Server.Name, "addr", a.Config.Server.Addr)
 
 		for _, fn := range a.onStart {
 			fn()
 		}
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			Log().Fatal().Err(err).Msg("HTTP server error")
+			log.Error("HTTP server error", "error", err)
 		}
 	}()
 
 	<-quit
-	Log().Info().Msg("shutting down...")
+	log.Info("shutting down...")
 
-	// OnClose callbacks
 	for _, fn := range a.onClose {
 		fn()
 	}
 
-	// Stop gRPC
 	if a.GRPC != nil {
 		a.GRPC.GracefulStop()
 	}
 
-	// Stop HTTP
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
-		Log().Error().Err(err).Msg("HTTP shutdown error")
+		log.Error("HTTP shutdown error", "error", err)
 	}
 
-	// Close DB
 	for name, db := range a.DBs {
 		if sqlDB, err := db.DB(); err == nil {
 			_ = sqlDB.Close()
-			Log().Debug().Str("db", name).Msg("db closed")
+			log.Debug("db closed", "db", name)
 		}
 	}
 
-	// Deregister service
 	if a.Registry != nil {
 		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = a.Registry.Deregister(dctx, a.Config.Server.Name, a.instanceID)
@@ -194,11 +191,10 @@ func (a *App) Run(setup SetupFunc) error {
 		dcancel()
 	}
 
-	// Close Redis
 	if a.Redis != nil {
 		_ = a.Redis.Close()
 	}
 
-	Log().Info().Msg("server exited")
+	log.Info("server exited")
 	return nil
 }
