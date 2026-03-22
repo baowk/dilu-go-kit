@@ -1,18 +1,19 @@
-# mofang-go-kit
+# dilu-go-kit
 
-Go 微服务基础工具包。提供统一的服务启动、HTTP 响应、中间件和数据访问层规范。
+Go 微服务基础工具包。提供统一的服务启动、HTTP 响应、中间件、数据访问层规范和服务注册发现。
 
 ## 特性
 
-- **boot** — 一行代码启动服务（Config + Logger + DB + Redis + 优雅关闭 + gRPC）
+- **boot** — 一行代码启动服务（Config + Logger + DB + Redis + gRPC + 优雅关闭）
 - **resp** — 统一 JSON 响应格式（Ok / Fail / Page / Error）
 - **mid** — 开箱即用的中间件（JWT / CORS / Recovery / RateLimit）
 - **store** — 数据访问层基础类型（ListOpts 分页）
+- **registry** — 服务注册与发现（etcd，启动自动注册，关闭自动注销）
 
 ## 安装
 
 ```bash
-go get github.com/mofang-ai/mofang-go-kit@latest
+go get github.com/baowk/dilu-go-kit@latest
 ```
 
 ## 快速开始
@@ -22,13 +23,17 @@ package main
 
 import (
     "log"
-    "github.com/mofang-ai/mofang-go-kit/boot"
-    "github.com/mofang-ai/mofang-go-kit/mid"
-    "github.com/mofang-ai/mofang-go-kit/resp"
+    "github.com/baowk/dilu-go-kit/boot"
+    "github.com/baowk/dilu-go-kit/mid"
+    "github.com/baowk/dilu-go-kit/resp"
+    "github.com/gin-gonic/gin"
 )
 
 func main() {
-    app, _ := boot.New("config.yaml")
+    app, err := boot.New("config.yaml")
+    if err != nil {
+        log.Fatal(err)
+    }
     app.Run(func(a *boot.App) error {
         a.Gin.Use(mid.Recovery(), mid.CORS())
         a.Gin.GET("/ping", func(c *gin.Context) {
@@ -44,13 +49,26 @@ func main() {
 ## 目录
 
 ```
-boot/       服务启动（Config/Logger/DB/Redis/App 生命周期）
+boot/       服务启动（Config/Logger/DB/Redis/App 生命周期/gRPC/Registry）
 resp/       统一 HTTP 响应
 mid/        中间件（JWT/CORS/Recovery/RateLimit）
 store/      基础类型（ListOpts）
+registry/   服务注册与发现（etcd）
 example/    完整示例服务
 docs/       规范文档
 ```
+
+## 服务注册与发现
+
+```yaml
+# config.yaml
+registry:
+  enable: true
+  endpoints:
+    - "127.0.0.1:2379"
+```
+
+服务启动时自动注册到 etcd，关闭时自动注销。网关可 Watch 实时发现后端服务变更。
 
 ## 规范
 
