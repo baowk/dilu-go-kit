@@ -16,8 +16,8 @@ type etcdRegistry struct {
 	leases map[string]clientv3.LeaseID // instanceID → leaseID
 }
 
-// New creates a new etcd-backed registry.
-func New(cfg Config) (Registry, error) {
+// NewEtcd creates a new etcd-backed registry.
+func NewEtcd(cfg Config) (Registry, error) {
 	if len(cfg.Endpoints) == 0 {
 		return nil, fmt.Errorf("registry: no etcd endpoints configured")
 	}

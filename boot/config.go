@@ -52,12 +52,15 @@ type NotifyConfig struct {
 	WsURL string `mapstructure:"wsUrl"` // mf-ws internal API base URL
 }
 
-// RegistryConfig describes the service registry (etcd).
+// RegistryConfig describes the service registry (etcd or consul).
 type RegistryConfig struct {
 	Enable    bool     `mapstructure:"enable"`
-	Endpoints []string `mapstructure:"endpoints"` // e.g. ["127.0.0.1:2379"]
+	Type      string   `mapstructure:"type"`      // "etcd" (default) or "consul"
+	Endpoints []string `mapstructure:"endpoints"` // etcd endpoints, e.g. ["127.0.0.1:2379"]
+	Address   string   `mapstructure:"address"`   // consul address, e.g. "127.0.0.1:8500"
+	Token     string   `mapstructure:"token"`     // consul ACL token (optional)
 	Prefix    string   `mapstructure:"prefix"`    // default "/mofang/services/"
-	TTL       int      `mapstructure:"ttl"`       // lease TTL in seconds, default 30
+	TTL       int      `mapstructure:"ttl"`       // lease/check TTL in seconds, default 30
 }
 
 // ServerConfig describes the HTTP server.

@@ -1,8 +1,14 @@
-// Package registry provides service registration and discovery via etcd.
+// Package registry provides service registration and discovery via etcd or consul.
 //
-// Usage (service side):
+// Usage (etcd):
 //
-//	r, _ := registry.New(registry.Config{Endpoints: []string{"127.0.0.1:2379"}})
+//	r, _ := registry.New(registry.Config{Type: "etcd", Endpoints: []string{"127.0.0.1:2379"}})
+//	r.Register(ctx, registry.Service{Name: "mf-user", Addr: ":7801"})
+//	defer r.Deregister(ctx, "mf-user", instanceID)
+//
+// Usage (consul):
+//
+//	r, _ := registry.New(registry.Config{Type: "consul", Address: "127.0.0.1:8500"})
 //	r.Register(ctx, registry.Service{Name: "mf-user", Addr: ":7801"})
 //	defer r.Deregister(ctx, "mf-user", instanceID)
 //
@@ -67,10 +73,32 @@ type Registry interface {
 
 // Config for the registry.
 type Config struct {
+	Type        string   `mapstructure:"type"`        // "etcd" (default) or "consul"
 	Endpoints   []string `mapstructure:"endpoints"`   // etcd endpoints, e.g. ["127.0.0.1:2379"]
+	Address     string   `mapstructure:"address"`     // consul address, e.g. "127.0.0.1:8500"
+	Token       string   `mapstructure:"token"`       // consul ACL token (optional)
 	Prefix      string   `mapstructure:"prefix"`      // key prefix, default "/mofang/services/"
-	TTL         int      `mapstructure:"ttl"`          // lease TTL in seconds, default 30
-	DialTimeout int      `mapstructure:"dialTimeout"`  // etcd dial timeout in seconds, default 5
+	TTL         int      `mapstructure:"ttl"`          // lease/check TTL in seconds, default 30
+	DialTimeout int      `mapstructure:"dialTimeout"`  // dial timeout in seconds, default 5
+}
+
+func (c *Config) registryType() string {
+	if c.Type != "" {
+		return c.Type
+	}
+	return "etcd"
+}
+
+// New creates a registry based on Config.Type ("etcd" or "consul").
+func New(cfg Config) (Registry, error) {
+	switch cfg.registryType() {
+	case "etcd":
+		return NewEtcd(cfg)
+	case "consul":
+		return NewConsul(cfg)
+	default:
+		return nil, fmt.Errorf("registry: unsupported type %q (expected etcd or consul)", cfg.Type)
+	}
 }
 
 func (c *Config) prefix() string {

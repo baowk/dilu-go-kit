@@ -80,9 +80,12 @@ func New(cfgPath string) (*App, error) {
 	}
 
 	// Registry (optional)
-	if cfg.Registry.Enable && len(cfg.Registry.Endpoints) > 0 {
+	if cfg.Registry.Enable && (len(cfg.Registry.Endpoints) > 0 || cfg.Registry.Address != "") {
 		reg, err := registry.New(registry.Config{
+			Type:      cfg.Registry.Type,
 			Endpoints: cfg.Registry.Endpoints,
+			Address:   cfg.Registry.Address,
+			Token:     cfg.Registry.Token,
 			Prefix:    cfg.Registry.Prefix,
 			TTL:       cfg.Registry.TTL,
 		})

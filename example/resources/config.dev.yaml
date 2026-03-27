@@ -18,5 +18,8 @@ grpc:
 
 registry:
   enable: true
-  endpoints:
+  type: etcd                    # "etcd" or "consul"
+  endpoints:                    # etcd endpoints
     - "127.0.0.1:2379"
+  # address: "127.0.0.1:8500"  # consul address (used when type: consul)
+  # token: ""                   # consul ACL token (optional)
