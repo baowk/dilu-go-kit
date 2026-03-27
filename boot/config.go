@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/baowk/dilu-go-kit/log"
 	"github.com/spf13/viper"
 )
 
@@ -14,6 +15,7 @@ import (
 // struct to add service-specific fields.
 type Config struct {
 	Server      ServerConfig              `mapstructure:"server"`
+	Log         LogConfig                 `mapstructure:"log"`
 	Database    map[string]DatabaseConfig `mapstructure:"database"`
 	Redis       RedisConfig               `mapstructure:"redis"`
 	GRPC        GRPCConfig                `mapstructure:"grpc"`
@@ -22,6 +24,14 @@ type Config struct {
 	CORS        CORSConfig                `mapstructure:"cors"`
 	AccessLimit AccessLimitConfig         `mapstructure:"accessLimit"`
 	Notify      NotifyConfig              `mapstructure:"notify"`
+}
+
+// LogConfig describes log output targets.
+//
+//	output: "console" (default), "file", or "both"
+type LogConfig struct {
+	Output string         `mapstructure:"output"` // "console" (default), "file", "both"
+	File   log.FileConfig `mapstructure:"file"`
 }
 
 // JWTConfig describes JWT authentication settings.
@@ -84,6 +94,7 @@ type DatabaseConfig struct {
 // RedisConfig describes a Redis connection. Leave Addr empty to disable.
 type RedisConfig struct {
 	Addr     string `mapstructure:"addr"`
+	Username string `mapstructure:"username"` // Redis 6+ ACL username (optional)
 	Password string `mapstructure:"password"`
 	DB       int    `mapstructure:"db"`
 }

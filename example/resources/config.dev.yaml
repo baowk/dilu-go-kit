@@ -3,6 +3,15 @@ server:
   addr: ":8080"
   mode: debug
 
+# log:
+#   output: console             # "console" (default) | "file" | "both"
+#   file:                       # required when output is "file" or "both"
+#     path: "logs/app.log"
+#     maxSize: 100              # MB per file (default 100)
+#     maxAge: 7                 # days to retain (default 7)
+#     maxBackups: 5             # old files to keep (default 5)
+#     compress: false           # gzip rotated files
+
 database:
   main:
     dsn: "host=127.0.0.1 user=postgres dbname=demo sslmode=disable"

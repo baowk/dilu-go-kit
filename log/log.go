@@ -30,13 +30,48 @@ type Logger interface {
 	With(args ...any) Logger
 }
 
-var global Logger = newSlogLogger("debug", "")
+var global Logger = newSlogLogger("debug", "", "", nil)
+
+// FileConfig enables file logging with rotation via lumberjack.
+// Leave zero-value (or nil pointer) to disable file output.
+type FileConfig struct {
+	Path       string `mapstructure:"path"`       // log file path, e.g. "logs/app.log"
+	MaxSize    int    `mapstructure:"maxSize"`     // max size in MB before rotation (default 100)
+	MaxAge     int    `mapstructure:"maxAge"`      // max days to retain old files (default 7)
+	MaxBackups int    `mapstructure:"maxBackups"`  // max number of old files (default 5)
+	Compress   bool   `mapstructure:"compress"`    // gzip rotated files (default false)
+}
+
+func (f *FileConfig) maxSize() int {
+	if f.MaxSize > 0 {
+		return f.MaxSize
+	}
+	return 100
+}
+
+func (f *FileConfig) maxAge() int {
+	if f.MaxAge > 0 {
+		return f.MaxAge
+	}
+	return 7
+}
+
+func (f *FileConfig) maxBackups() int {
+	if f.MaxBackups > 0 {
+		return f.MaxBackups
+	}
+	return 5
+}
 
 // Init initializes the global logger. Call once at startup.
 //
-//	log.Init("debug", "mf-user")  // mode: "debug" (text) or "release" (json)
-func Init(mode, serviceName string) {
-	global = newSlogLogger(mode, serviceName)
+//	log.Init("debug", "mf-user", "", nil)                                       // console only (default)
+//	log.Init("release", "mf-user", "file", &log.FileConfig{Path: "logs/app.log"}) // file only
+//	log.Init("release", "mf-user", "both", &log.FileConfig{Path: "logs/app.log"}) // console + file
+//
+// output: "console" (default), "file", "both"
+func Init(mode, serviceName, output string, file *FileConfig) {
+	global = newSlogLogger(mode, serviceName, output, file)
 }
 
 // SetLogger replaces the global logger with a custom implementation.

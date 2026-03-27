@@ -42,7 +42,7 @@ func New(cfgPath string) (*App, error) {
 		return nil, err
 	}
 
-	InitLogger(cfg.Server.Mode, cfg.Server.Name)
+	log.Init(cfg.Server.Mode, cfg.Server.Name, cfg.Log.Output, &cfg.Log.File)
 
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)

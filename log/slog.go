@@ -2,9 +2,12 @@ package log
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"time"
+
+	"gopkg.in/lumberjack.v2"
 )
 
 // slogLogger wraps slog.Logger to implement our Logger interface.
@@ -12,17 +15,49 @@ type slogLogger struct {
 	l *slog.Logger
 }
 
-func newSlogLogger(mode, serviceName string) *slogLogger {
+func newSlogLogger(mode, serviceName, output string, file *FileConfig) *slogLogger {
 	var handler slog.Handler
+
+	// Determine output writer based on output mode: "console" (default), "file", "both"
+	var w io.Writer
+	switch output {
+	case "file":
+		if file == nil || file.Path == "" {
+			w = os.Stdout // fallback if no file path configured
+		} else {
+			w = &lumberjack.Logger{
+				Filename:   file.Path,
+				MaxSize:    file.maxSize(),
+				MaxAge:     file.maxAge(),
+				MaxBackups: file.maxBackups(),
+				Compress:   file.Compress,
+			}
+		}
+	case "both":
+		if file != nil && file.Path != "" {
+			lj := &lumberjack.Logger{
+				Filename:   file.Path,
+				MaxSize:    file.maxSize(),
+				MaxAge:     file.maxAge(),
+				MaxBackups: file.maxBackups(),
+				Compress:   file.Compress,
+			}
+			w = io.MultiWriter(os.Stdout, lj)
+		} else {
+			w = os.Stdout // fallback if no file path configured
+		}
+	default: // "console" or empty
+		w = os.Stdout
+	}
 
 	if mode == "release" || mode == "production" {
 		// JSON output for production (structured, machine-parseable)
-		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		handler = slog.NewJSONHandler(w, &slog.HandlerOptions{
 			Level: slog.LevelInfo,
 		})
 	} else {
 		// Text output for development (human-readable)
-		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		handler = slog.NewTextHandler(w, &slog.HandlerOptions{
 			Level: slog.LevelDebug,
 		})
 	}
