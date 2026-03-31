@@ -16,6 +16,7 @@ import (
 type Config struct {
 	Server      ServerConfig              `mapstructure:"server"`
 	Log         LogConfig                 `mapstructure:"log"`
+	Remote      RemoteConfig              `mapstructure:"remote"`
 	Database    map[string]DatabaseConfig `mapstructure:"database"`
 	Redis       RedisConfig               `mapstructure:"redis"`
 	GRPC        GRPCConfig                `mapstructure:"grpc"`

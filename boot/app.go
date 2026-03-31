@@ -42,6 +42,13 @@ func New(cfgPath string) (*App, error) {
 		return nil, err
 	}
 
+	// Merge remote config (etcd/consul KV) if enabled
+	if cfg.Remote.Enable {
+		if err := MergeRemoteConfig(cfg.Remote, cfg); err != nil {
+			return nil, fmt.Errorf("remote config: %w", err)
+		}
+	}
+
 	log.Init(cfg.Server.Mode, cfg.Server.Name, cfg.Log.Output, &cfg.Log.File)
 
 	if cfg.Server.Mode == "release" {
