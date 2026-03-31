@@ -19,6 +19,7 @@ func OpenRedis(cfg RedisConfig) (*redis.Client, error) {
 		DB:       cfg.DB,
 	})
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		_ = rdb.Close()
 		return nil, fmt.Errorf("redis ping: %w", err)
 	}
 	return rdb, nil

@@ -19,8 +19,9 @@ func RateLimit(max int, window time.Duration) gin.HandlerFunc {
 	clients := make(map[string]*entry)
 
 	// Background cleanup every window period
+	ticker := time.NewTicker(window)
 	go func() {
-		for range time.Tick(window) {
+		for range ticker.C {
 			mu.Lock()
 			now := time.Now()
 			for k, e := range clients {

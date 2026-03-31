@@ -75,7 +75,11 @@ func OpenDB(cfg DatabaseConfig, mode string) (*gorm.DB, error) {
 
 	// ── Health check on startup ──
 
-	pingOnOpen := cfg.PingOnOpen || cfg.SlowThreshold == 0 // default true
+	pingOnOpen := true // default: always ping on open
+	// Only skip if PingOnOpen is explicitly set and there's a custom SlowThreshold (indicating intentional config)
+	if cfg.SlowThreshold > 0 && !cfg.PingOnOpen {
+		pingOnOpen = cfg.PingOnOpen
+	}
 	if pingOnOpen {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -88,11 +92,19 @@ func OpenDB(cfg DatabaseConfig, mode string) (*gorm.DB, error) {
 }
 
 // OpenAllDBs opens all databases defined in config.
+// On failure, already-opened connections are closed before returning.
 func OpenAllDBs(cfgs map[string]DatabaseConfig, mode string) (map[string]*gorm.DB, error) {
 	dbs := make(map[string]*gorm.DB, len(cfgs))
 	for name, cfg := range cfgs {
 		db, err := OpenDB(cfg, mode)
 		if err != nil {
+			// Close already-opened connections
+			for n, d := range dbs {
+				if sqlDB, e := d.DB(); e == nil {
+					_ = sqlDB.Close()
+					slog.Debug("db closed on init failure", "db", n)
+				}
+			}
 			return nil, fmt.Errorf("db[%s]: %w", name, err)
 		}
 		dbs[name] = db

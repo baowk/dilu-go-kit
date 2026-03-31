@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
@@ -11,9 +12,11 @@ import (
 
 // etcdRegistry implements Registry using etcd v3.
 type etcdRegistry struct {
-	client *clientv3.Client
-	cfg    Config
-	leases map[string]clientv3.LeaseID // instanceID → leaseID
+	client  *clientv3.Client
+	cfg     Config
+	mu      sync.Mutex
+	leases  map[string]clientv3.LeaseID    // instanceID → leaseID
+	cancels map[string]context.CancelFunc  // instanceID → keepalive cancel
 }
 
 // NewEtcd creates a new etcd-backed registry.
@@ -39,9 +42,10 @@ func NewEtcd(cfg Config) (Registry, error) {
 	}
 
 	return &etcdRegistry{
-		client: client,
-		cfg:    cfg,
-		leases: make(map[string]clientv3.LeaseID),
+		client:  client,
+		cfg:     cfg,
+		leases:  make(map[string]clientv3.LeaseID),
+		cancels: make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -70,13 +74,18 @@ func (r *etcdRegistry) Register(ctx context.Context, svc Service) error {
 		return fmt.Errorf("registry: put: %w", err)
 	}
 
-	r.leases[svc.InstanceID] = lease.ID
-
-	// Keep alive in background
-	ch, err := r.client.KeepAlive(context.Background(), lease.ID)
+	// Keep alive in background with cancellable context
+	kaCtx, kaCancel := context.WithCancel(context.Background())
+	ch, err := r.client.KeepAlive(kaCtx, lease.ID)
 	if err != nil {
+		kaCancel()
 		return fmt.Errorf("registry: keepalive: %w", err)
 	}
+
+	r.mu.Lock()
+	r.leases[svc.InstanceID] = lease.ID
+	r.cancels[svc.InstanceID] = kaCancel
+	r.mu.Unlock()
 
 	go func() {
 		for ka := range ch {
@@ -104,11 +113,18 @@ func (r *etcdRegistry) Deregister(ctx context.Context, name, instanceID string) 
 		return fmt.Errorf("registry: delete: %w", err)
 	}
 
+	r.mu.Lock()
+	// Cancel keepalive goroutine
+	if cancel, ok := r.cancels[instanceID]; ok {
+		cancel()
+		delete(r.cancels, instanceID)
+	}
 	// Revoke lease
 	if leaseID, ok := r.leases[instanceID]; ok {
 		_, _ = r.client.Revoke(ctx, leaseID)
 		delete(r.leases, instanceID)
 	}
+	r.mu.Unlock()
 
 	slog.Info("registry: deregistered", "service", name, "instance", instanceID)
 	return nil
@@ -180,12 +196,19 @@ func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, er
 }
 
 func (r *etcdRegistry) Close() error {
+	r.mu.Lock()
+	// Cancel all keepalive goroutines
+	for id, cancel := range r.cancels {
+		cancel()
+		delete(r.cancels, id)
+	}
 	// Revoke all leases
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+	ctx, ctxCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer ctxCancel()
 	for id, leaseID := range r.leases {
 		_, _ = r.client.Revoke(ctx, leaseID)
 		delete(r.leases, id)
 	}
+	r.mu.Unlock()
 	return r.client.Close()
 }

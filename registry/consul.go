@@ -14,10 +14,11 @@ import (
 
 // consulRegistry implements Registry using HashiCorp Consul.
 type consulRegistry struct {
-	client *consul.Client
-	cfg    Config
-	mu     sync.Mutex
-	checks map[string]string // instanceID → checkID
+	client  *consul.Client
+	cfg     Config
+	mu      sync.Mutex
+	checks  map[string]string             // instanceID → checkID
+	cancels map[string]context.CancelFunc // instanceID → TTL refresh cancel
 }
 
 // NewConsul creates a new Consul-backed registry.
@@ -48,9 +49,10 @@ func NewConsul(cfg Config) (Registry, error) {
 	}
 
 	return &consulRegistry{
-		client: client,
-		cfg:    cfg,
-		checks: make(map[string]string),
+		client:  client,
+		cfg:     cfg,
+		checks:  make(map[string]string),
+		cancels: make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -63,6 +65,9 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 	host, portStr, err := net.SplitHostPort(svc.Addr)
 	if err != nil {
 		return fmt.Errorf("registry: parse addr %q: %w", svc.Addr, err)
+	}
+	if host == "" {
+		host = localIP()
 	}
 	port, _ := strconv.Atoi(portStr)
 
@@ -100,25 +105,27 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		return fmt.Errorf("registry: consul pass ttl: %w", err)
 	}
 
+	ttlCtx, ttlCancel := context.WithCancel(context.Background())
+
 	r.mu.Lock()
 	r.checks[svc.InstanceID] = checkID
+	r.cancels[svc.InstanceID] = ttlCancel
 	r.mu.Unlock()
 
 	// Background TTL refresh
 	go func() {
 		ticker := time.NewTicker(time.Duration(ttl/3) * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			r.mu.Lock()
-			_, ok := r.checks[svc.InstanceID]
-			r.mu.Unlock()
-			if !ok {
+		for {
+			select {
+			case <-ttlCtx.Done():
 				return
-			}
-			if err := r.client.Agent().PassTTL(checkID, "alive"); err != nil {
-				slog.Warn("registry: consul ttl refresh failed",
-					"service", svc.Name, "instance", svc.InstanceID, "error", err)
-				return
+			case <-ticker.C:
+				if err := r.client.Agent().PassTTL(checkID, "alive"); err != nil {
+					slog.Warn("registry: consul ttl refresh failed",
+						"service", svc.Name, "instance", svc.InstanceID, "error", err)
+					return
+				}
 			}
 		}
 	}()
@@ -136,6 +143,10 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 
 func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string) error {
 	r.mu.Lock()
+	if cancel, ok := r.cancels[instanceID]; ok {
+		cancel()
+		delete(r.cancels, instanceID)
+	}
 	delete(r.checks, instanceID)
 	r.mu.Unlock()
 
@@ -273,6 +284,11 @@ func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, 
 func (r *consulRegistry) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	for _, cancel := range r.cancels {
+		cancel()
+	}
+	r.cancels = make(map[string]context.CancelFunc)
 
 	for instanceID, checkID := range r.checks {
 		_ = r.client.Agent().ServiceDeregister(instanceID)

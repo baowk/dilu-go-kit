@@ -35,11 +35,9 @@ func Default(r *gin.Engine, cfg DefaultConfig) {
 	r.Use(ErrorHandler())
 	r.Use(Logger())
 
-	// CORS
+	// CORS — only add if explicitly enabled
 	if cfg.CORS.Enable {
 		r.Use(CORSFromConfig(cfg.CORS))
-	} else {
-		r.Use(CORS())
 	}
 
 	// Rate limit

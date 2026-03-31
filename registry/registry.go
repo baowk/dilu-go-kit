@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"time"
 )
@@ -143,6 +144,20 @@ func unmarshalService(data []byte) (Service, error) {
 	var svc Service
 	err := json.Unmarshal(data, &svc)
 	return svc, err
+}
+
+// localIP returns a non-loopback IPv4 address of the host, or "127.0.0.1" as fallback.
+func localIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, addr := range addrs {
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
+			return ipNet.IP.String()
+		}
+	}
+	return "127.0.0.1"
 }
 
 // GenerateInstanceID creates a unique instance ID from hostname + pid + timestamp.

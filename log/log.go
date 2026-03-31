@@ -71,6 +71,10 @@ func (f *FileConfig) maxBackups() int {
 //
 // output: "console" (default), "file", "both"
 func Init(mode, serviceName, output string, file *FileConfig) {
+	// Close previous logger's file handle if any
+	if sl, ok := global.(*slogLogger); ok && sl.closer != nil {
+		_ = sl.closer.Close()
+	}
 	global = newSlogLogger(mode, serviceName, output, file)
 }
 

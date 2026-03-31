@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -163,5 +164,21 @@ func TestNew_defaultTypeIsEtcd(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "etcd") {
 		t.Errorf("default type should route to etcd, got error: %v", err)
+	}
+}
+
+// --------------- localIP ---------------
+
+func TestLocalIP_returnsValidIP(t *testing.T) {
+	ip := localIP()
+	if net.ParseIP(ip) == nil {
+		t.Errorf("localIP() = %q, not a valid IP", ip)
+	}
+}
+
+func TestLocalIP_nonEmpty(t *testing.T) {
+	ip := localIP()
+	if ip == "" {
+		t.Error("localIP() should never return empty string")
 	}
 }

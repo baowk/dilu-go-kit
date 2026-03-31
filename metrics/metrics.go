@@ -9,6 +9,7 @@ package metrics
 
 import (
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -17,13 +18,19 @@ import (
 )
 
 var (
-	httpRequestsTotal *prometheus.CounterVec
-	httpRequestDuration *prometheus.HistogramVec
+	httpRequestsTotal    *prometheus.CounterVec
+	httpRequestDuration  *prometheus.HistogramVec
 	httpRequestsInFlight prometheus.Gauge
+	initOnce             sync.Once
 )
 
 // Init registers Prometheus metrics with the given service name as a label.
+// Safe to call multiple times; only the first call takes effect.
 func Init(serviceName string) {
+	initOnce.Do(func() { initMetrics(serviceName) })
+}
+
+func initMetrics(serviceName string) {
 	httpRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "http_requests_total",

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,11 +32,27 @@ type App struct {
 	GRPC     *grpc.Server
 	Registry registry.Registry
 
+	cfgMu          sync.RWMutex // protects Config during hot-reload
 	instanceID     string
 	onStart        []func()
 	onClose        []func()
 	onConfigChange []ConfigChangeFunc
 	watchCancel    context.CancelFunc
+}
+
+// GetConfig returns the current config (thread-safe for use during runtime).
+// During setup (before Run), accessing a.Config directly is fine.
+func (a *App) GetConfig() *Config {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.Config
+}
+
+// swapConfig replaces the config under lock.
+func (a *App) swapConfig(cfg *Config) {
+	a.cfgMu.Lock()
+	defer a.cfgMu.Unlock()
+	a.Config = cfg
 }
 
 // SetupFunc is called during Run to register routes, stores, gRPC services, etc.
@@ -197,10 +214,18 @@ func (a *App) Run(setup SetupFunc) error {
 		a.watchCancel()
 	}
 
+	// Deregister FIRST so other services stop sending traffic
+	if a.Registry != nil {
+		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_ = a.Registry.Deregister(dctx, a.Config.Server.Name, a.instanceID)
+		dcancel()
+	}
+
 	for _, fn := range a.onClose {
 		fn()
 	}
 
+	// Now drain in-flight requests
 	if a.GRPC != nil {
 		a.GRPC.GracefulStop()
 	}
@@ -219,10 +244,7 @@ func (a *App) Run(setup SetupFunc) error {
 	}
 
 	if a.Registry != nil {
-		dctx, dcancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = a.Registry.Deregister(dctx, a.Config.Server.Name, a.instanceID)
 		_ = a.Registry.Close()
-		dcancel()
 	}
 
 	if a.Redis != nil {
@@ -235,29 +257,37 @@ func (a *App) Run(setup SetupFunc) error {
 
 // watchRemoteConfig watches the remote config key and applies changes.
 func (a *App) watchRemoteConfig(ctx context.Context) {
-	reg := a.Config.Registry
-	serviceName := a.Config.Server.Name
+	cfg := a.GetConfig()
+	reg := cfg.Registry
+	serviceName := cfg.Server.Name
 	format := reg.configFormat()
+
+	// Snapshot callbacks — OnConfigChange must be called before Run
+	a.cfgMu.RLock()
+	callbacks := make([]ConfigChangeFunc, len(a.onConfigChange))
+	copy(callbacks, a.onConfigChange)
+	a.cfgMu.RUnlock()
 
 	log.Info("remote config: watching for changes", "key", reg.resolveConfigKey(serviceName))
 
 	err := WatchRemoteConfig(ctx, reg, serviceName, func(data []byte) {
 		// Parse into a fresh Config, starting from current as base
-		newCfg := *a.Config
+		current := a.GetConfig()
+		newCfg := *current
 		if err := unmarshalBytes(data, format, &newCfg); err != nil {
 			log.Error("remote config: failed to parse update", "error", err)
 			return
 		}
 
 		// Run all OnConfigChange callbacks; any error rejects the update
-		for _, fn := range a.onConfigChange {
+		for _, fn := range callbacks {
 			if err := fn(&newCfg); err != nil {
 				log.Warn("remote config: update rejected by callback", "error", err)
 				return
 			}
 		}
 
-		a.Config = &newCfg
+		a.swapConfig(&newCfg)
 		log.Info("remote config: config updated")
 	})
 	if err != nil && ctx.Err() == nil {
