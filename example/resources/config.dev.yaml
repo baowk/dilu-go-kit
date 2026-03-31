@@ -12,16 +12,6 @@ server:
 #     maxBackups: 5             # old files to keep (default 5)
 #     compress: false           # gzip rotated files
 
-# remote:                         # remote config from etcd/consul KV (overrides local)
-#   enable: true
-#   type: etcd                    # "etcd" or "consul"
-#   endpoints:                    # etcd endpoints
-#     - "127.0.0.1:2379"
-#   # address: "127.0.0.1:8500"  # consul address
-#   # token: ""                   # consul ACL token
-#   key: "/config/demo-service"   # KV key storing YAML/JSON config
-#   format: yaml                  # "yaml" (default) or "json"
-
 database:
   main:
     dsn: "host=127.0.0.1 user=postgres dbname=demo sslmode=disable"
@@ -37,8 +27,14 @@ grpc:
 
 registry:
   enable: true
-  type: etcd                    # "etcd" or "consul"
-  endpoints:                    # etcd endpoints
+  type: etcd                     # "etcd" or "consul"
+  endpoints:                     # etcd endpoints
     - "127.0.0.1:2379"
-  # address: "127.0.0.1:8500"  # consul address (used when type: consul)
-  # token: ""                   # consul ACL token (optional)
+  # address: "127.0.0.1:8500"   # consul address (used when type: consul)
+  # token: ""                    # consul ACL token (optional)
+  # configKey: "/config/"        # enable remote config: auto key = configKey + server.name
+  # configNode: ""               # per-node override (optional, or env REMOTE_NODE)
+  # configFormat: yaml           # "yaml" (default) or "json"
+  #
+  # Merge order: local YAML → /config/demo-service → /config/demo-service/{node}
+  # Each layer only overrides keys it contains

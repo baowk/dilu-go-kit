@@ -1,21 +1,21 @@
 # dilu-go-kit
 
-Go 微服务基础工具包。提供统一的服务启动、日志、中间件、错误码、服务发现和事件通知。
+Go 微服务基础工具包。提供统一的服务启动、日志、中间件、错误码、服务发现、远程配置和事件通知。
 
 ## 特性
 
-- **boot** — 一行启动服务（Config + DB + Redis + gRPC + etcd 注册 + 优雅关闭）
-- **log** — 统一日志接口（slog 实现，traceId 自动注入，底层可替换）
+- **boot** — 一行启动服务（Config + DB + Redis + gRPC + 注册 + 远程配置 + 优雅关闭）
+- **log** — 统一日志接口（slog 实现，traceId 自动注入，支持 console/file/both 输出）
 - **mid** — 可配置中间件（Trace + Recovery + Logger + ErrorHandler + JWT + CORS + RateLimit）
 - **resp** — 统一 HTTP 响应（Ok / Fail / Page / Error）+ 标准错误码
 - **store** — 数据访问层基础类型（ListOpts 分页）
-- **registry** — 服务注册与发现（etcd）
+- **registry** — 服务注册与发现（etcd / consul）
 - **notify** — 通用 HTTP 事件推送（支持 traceId 透传）
 
 ## 安装
 
 ```bash
-go get github.com/baowk/dilu-go-kit@v0.3.0
+go get github.com/baowk/dilu-go-kit@latest
 ```
 
 ## 快速开始
@@ -54,12 +54,12 @@ func main() {
 ## 目录
 
 ```
-boot/       服务启动（Config/DB/Redis/gRPC/Registry/Logger）
-log/        统一日志接口（Logger 接口 + slog 实现 + traceId）
+boot/       服务启动（Config/DB/Redis/gRPC/Registry/RemoteConfig/Logger）
+log/        统一日志接口（Logger 接口 + slog 实现 + traceId + lumberjack file rotation）
 mid/        中间件（Trace/Recovery/Logger/ErrorHandler/JWT/CORS/RateLimit/Default/gRPC interceptor）
 resp/       统一 HTTP 响应 + 标准错误码
 store/      数据访问基础类型（ListOpts）
-registry/   服务注册与发现（etcd）
+registry/   服务注册与发现（etcd / consul）
 notify/     通用事件推送
 example/    完整示例服务
 docs/       规范文档
@@ -73,12 +73,22 @@ import "github.com/baowk/dilu-go-kit/log"
 log.Info("server started", "port", 8080)
 log.InfoContext(ctx, "created env", "env_id", 123)  // 自动带 trace_id
 log.With("module", "auth").Warn("token expired")
-
-// 输出（JSON）:
-// {"time":"...","level":"INFO","msg":"created env","trace_id":"abc-123","env_id":123,"service":"mf-env"}
 ```
 
-底层使用 slog（Go 标准库），通过 `log.SetLogger()` 可替换为任意实现。
+支持三种输出模式，通过配置切换：
+
+```yaml
+log:
+  output: console   # console（默认）| file | both
+  file:
+    path: "logs/app.log"
+    maxSize: 100    # MB/文件（默认 100）
+    maxAge: 7       # 保留天数（默认 7）
+    maxBackups: 5   # 旧文件数（默认 5）
+    compress: false # gzip 压缩
+```
+
+底层使用 slog（Go 标准库），文件输出使用 lumberjack 自动 rotation。通过 `log.SetLogger()` 可替换为任意实现。
 
 ## 中间件
 
@@ -125,13 +135,51 @@ notify.SendContext(ctx, "proxy", payload)  // 自动携带 traceId
 
 ## 服务注册与发现
 
+支持 etcd 和 consul 两种后端：
+
+```yaml
+# etcd
+registry:
+  enable: true
+  type: etcd
+  endpoints: ["127.0.0.1:2379"]
+
+# consul
+registry:
+  enable: true
+  type: consul
+  address: "127.0.0.1:8500"
+  token: ""                    # ACL token（可选）
+```
+
+服务启动自动注册，关闭自动注销。网关 Watch 实时发现变更。
+
+## 远程配置
+
+复用 registry 连接，从 etcd/consul KV 加载配置并热更新：
+
 ```yaml
 registry:
   enable: true
+  type: etcd
   endpoints: ["127.0.0.1:2379"]
+  configKey: "/config/"        # 有值即启用，自动拼接 server.name
+  configNode: ""               # 节点级覆盖（可选，或 env REMOTE_NODE）
 ```
 
-服务启动自动注册到 etcd，关闭自动注销。网关 Watch 实时发现变更。
+三层深度合并（每层只覆盖它有的 key）：
+```
+本地 YAML → /config/mf-user → /config/mf-user/node-1
+```
+
+运行时自动 watch，KV 变更秒级生效：
+
+```go
+app.OnConfigChange(func(cfg *boot.Config) error {
+    log.Info("config updated", "redis", cfg.Redis.Addr)
+    return nil  // 返回 error 可拒绝此次更新
+})
+```
 
 ## 配置示例
 
@@ -148,6 +196,13 @@ database:
 
 redis:
   addr: "127.0.0.1:6379"
+  username: ""                # Redis 6+ ACL（可选）
+  password: ""
+
+log:
+  output: console             # console / file / both
+  # file:
+  #   path: "logs/app.log"
 
 jwt:
   secret: "your-secret"
@@ -167,7 +222,11 @@ notify:
 
 registry:
   enable: true
+  type: etcd                  # etcd / consul
   endpoints: ["127.0.0.1:2379"]
+  # address: "127.0.0.1:8500"  # consul
+  configKey: "/config/"       # 启用远程配置
+  # configNode: "node-1"      # 节点级覆盖
 ```
 
 ## AI 辅助开发

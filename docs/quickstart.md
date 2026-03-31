@@ -63,6 +63,12 @@ server:
   addr: ":8080"
   mode: debug
 
+# log:                        # 默认 console 输出，可选 file / both
+#   output: both
+#   file:
+#     path: "logs/app.log"
+#     maxAge: 7
+
 database:
   main:
     dsn: "host=127.0.0.1 user=postgres dbname=mydb sslmode=disable"
@@ -80,8 +86,10 @@ grpc:
 
 registry:
   enable: true
+  type: etcd                # etcd / consul
   endpoints:
     - "127.0.0.1:2379"
+  # configKey: "/config/"   # 启用远程配置（自动拼 server.name）
 ```
 
 ### 4. Model

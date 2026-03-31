@@ -170,6 +170,9 @@ log.InfoContext(ctx, "msg", "key", value)             // 自动带 trace_id
 log.With("module", "auth").Error("failed", "err", e) // 子 logger
 ```
 
+输出模式通过 `log.output` 配置：`console`（默认）、`file`（仅文件）、`both`（双写）。
+文件输出使用 lumberjack 自动 rotation，详见配置示例。
+
 ### 事件通知
 
 ```go
@@ -190,6 +193,15 @@ server:
   addr: ":8080"
   mode: debug             # debug / release
 
+log:
+  output: console           # console（默认）/ file / both
+  file:                     # output 为 file 或 both 时必填
+    path: "logs/app.log"
+    maxSize: 100            # MB/文件（默认 100）
+    maxAge: 7               # 保留天数（默认 7）
+    maxBackups: 5           # 旧文件数（默认 5）
+    compress: false         # gzip 压缩
+
 database:
   main:
     dsn: "host=127.0.0.1 user=postgres dbname=mydb sslmode=disable"
@@ -202,6 +214,7 @@ database:
 
 redis:
   addr: "127.0.0.1:6379"
+  username: ""              # Redis 6+ ACL 用户名（可选）
   password: ""
   db: 0
 
@@ -230,10 +243,16 @@ notify:
 
 registry:
   enable: true
-  endpoints:
+  type: etcd                # etcd（默认）/ consul
+  endpoints:                # etcd 端点
     - "127.0.0.1:2379"
+  # address: "127.0.0.1:8500"  # consul 地址
+  # token: ""                   # consul ACL token
   prefix: "/services/"
   ttl: 30
+  configKey: "/config/"     # 有值即启用远程配置（自动拼 server.name）
+  # configNode: "node-1"   # 节点级覆盖（可选，或 env REMOTE_NODE）
+  # configFormat: yaml      # yaml（默认）/ json
 ```
 
 ### 扩展配置
@@ -251,7 +270,7 @@ type MyConfig struct {
 
 ## 六、服务注册与发现
 
-启用 `registry` 后，服务启动自动注册到 etcd，关闭自动注销。
+支持 etcd 和 consul 两种后端，启用 `registry` 后服务启动自动注册，关闭自动注销。
 
 **注册格式**：
 ```
@@ -260,6 +279,56 @@ value: {"name":"mf-user","instance_id":"mf-user-host-1234-56789","addr":":7801",
 lease: 30s TTL + keepalive
 ```
 
-**网关侧**：Watch etcd 前缀，动态更新路由表，新服务上线/下线无需改配置。
+**网关侧**：Watch 前缀，动态更新路由表，新服务上线/下线无需改配置。
 
 **本地开发**：`registry.enable: false` 即可关闭，使用静态地址。
+
+## 七、远程配置
+
+复用 registry 的 etcd/consul 连接，从 KV 加载配置并实时热更新。
+
+### 启用
+
+在 `registry` 中设置 `configKey` 即可，无需额外配置段：
+
+```yaml
+registry:
+  enable: true
+  type: etcd
+  endpoints: ["127.0.0.1:2379"]
+  configKey: "/config/"         # 有值即启用
+  configNode: "node-1"          # 可选，或 env REMOTE_NODE
+```
+
+### 合并规则
+
+三层深度合并（每层只覆盖它包含的 key，不清零其他字段）：
+
+```
+1. 本地 YAML           ← 基础配置
+2. /config/mf-user     ← 服务级共享（所有 mf-user 节点共用）
+3. /config/mf-user/node-1  ← 节点级覆盖（仅该节点生效）
+```
+
+### 热更新
+
+运行时自动 watch 远程 key，变更秒级生效（etcd 实时推送，consul long-poll）。
+业务层通过回调感知变更：
+
+```go
+app.OnConfigChange(func(cfg *boot.Config) error {
+    log.Info("config updated", "redis", cfg.Redis.Addr)
+    return nil  // 返回 error 拒绝此次更新
+})
+```
+
+### 多服务 KV 布局示例
+
+```
+etcd/consul KV:
+  /config/mf-user          → { database: ..., redis: ... }
+  /config/mf-user/node-1   → { server: { addr: ":7801" } }
+  /config/mf-user/node-2   → { server: { addr: ":7802" } }
+  /config/mf-order         → { database: ..., redis: ... }
+  /config/mf-gateway       → { jwt: ..., cors: ... }
+```

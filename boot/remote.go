@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/baowk/dilu-go-kit/log"
@@ -13,74 +14,150 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-// RemoteConfig describes a remote configuration source (etcd or consul KV).
-type RemoteConfig struct {
-	Enable    bool     `mapstructure:"enable"`
-	Type      string   `mapstructure:"type"`      // "etcd" or "consul"
-	Endpoints []string `mapstructure:"endpoints"` // etcd endpoints, e.g. ["127.0.0.1:2379"]
-	Address   string   `mapstructure:"address"`   // consul address, e.g. "127.0.0.1:8500"
-	Token     string   `mapstructure:"token"`     // consul ACL token (optional)
-	Key       string   `mapstructure:"key"`       // KV key, e.g. "/config/mf-user"
-	Format    string   `mapstructure:"format"`    // "yaml" (default) or "json"
+// ── key resolution helpers (on RegistryConfig) ──
+
+// configKeyPrefix returns the config key prefix, default "/config/".
+func (r *RegistryConfig) configKeyPrefix() string {
+	if r.ConfigKey != "" {
+		return r.ConfigKey
+	}
+	return "/config/"
 }
 
-func (r *RemoteConfig) format() string {
-	if r.Format == "json" {
+// resolveConfigKey returns the service-level KV key: configKey + serviceName.
+func (r *RegistryConfig) resolveConfigKey(serviceName string) string {
+	return r.configKeyPrefix() + serviceName
+}
+
+// resolveConfigNodeKey returns the node-level KV key, or "" if no node is set.
+func (r *RegistryConfig) resolveConfigNodeKey(serviceName string) string {
+	node := r.configNode()
+	if node == "" {
+		return ""
+	}
+	return r.resolveConfigKey(serviceName) + "/" + node
+}
+
+func (r *RegistryConfig) configNode() string {
+	if r.ConfigNode != "" {
+		return r.ConfigNode
+	}
+	return os.Getenv("REMOTE_NODE")
+}
+
+func (r *RegistryConfig) configFormat() string {
+	if r.ConfigFormat == "json" {
 		return "json"
 	}
 	return "yaml"
 }
 
+// registryType returns "etcd" (default) or "consul".
+func (r *RegistryConfig) registryType() string {
+	if r.Type != "" {
+		return r.Type
+	}
+	return "etcd"
+}
+
+// ── public API ──
+
 // LoadRemoteConfig reads a config value from etcd or consul KV and
 // unmarshals it into cfg.
-func LoadRemoteConfig(src RemoteConfig, cfg any) error {
-	data, err := fetchRemote(src)
+func LoadRemoteConfig(reg RegistryConfig, serviceName string, cfg any) error {
+	key := reg.resolveConfigKey(serviceName)
+	data, err := fetchRemoteByKey(reg, key)
 	if err != nil {
 		return err
 	}
-	return unmarshalBytes(data, src.format(), cfg)
+	return unmarshalBytes(data, reg.configFormat(), cfg)
 }
 
-// WatchRemoteConfig watches the remote key for changes and calls onChange
-// with the new raw bytes whenever the value is updated.
-// It blocks until ctx is cancelled.
-func WatchRemoteConfig(ctx context.Context, src RemoteConfig, onChange func([]byte)) error {
-	switch src.Type {
+// WatchRemoteConfig watches the service config key for changes and calls
+// onChange with new raw bytes. Blocks until ctx is cancelled.
+func WatchRemoteConfig(ctx context.Context, reg RegistryConfig, serviceName string, onChange func([]byte)) error {
+	key := reg.resolveConfigKey(serviceName)
+	switch reg.registryType() {
 	case "etcd":
-		return watchEtcd(ctx, src, onChange)
+		return watchEtcd(ctx, reg, key, onChange)
 	case "consul":
-		return watchConsul(ctx, src, onChange)
+		return watchConsul(ctx, reg, key, onChange)
 	default:
-		return fmt.Errorf("remote config: unsupported type %q", src.Type)
+		return fmt.Errorf("remote config: unsupported type %q", reg.Type)
 	}
 }
 
-// fetchRemote reads the raw value from the remote KV store.
-func fetchRemote(src RemoteConfig) ([]byte, error) {
-	switch src.Type {
+// MergeRemoteConfig loads config from registry's KV backend and deep-merges
+// it into base. Only keys present in the remote config are overwritten.
+//
+// Merge order: local → service shared → node-specific.
+func MergeRemoteConfig(reg RegistryConfig, serviceName string, base *Config) error {
+	svcKey := reg.resolveConfigKey(serviceName)
+
+	// Load local base into viper via JSON round-trip
+	merged := viper.New()
+	merged.SetConfigType("json")
+	buf, _ := json.Marshal(base)
+	if err := merged.ReadConfig(bytes.NewReader(buf)); err != nil {
+		return fmt.Errorf("remote config: encode local: %w", err)
+	}
+
+	// Layer 1: service shared config
+	svcData, err := fetchRemoteByKey(reg, svcKey)
+	if err != nil {
+		return err
+	}
+	if err := mergeLayer(merged, svcData, reg.configFormat()); err != nil {
+		return fmt.Errorf("remote config: merge service: %w", err)
+	}
+	log.Info("remote config: service config loaded", "key", svcKey)
+
+	// Layer 2: node-specific config (optional, missing key is not an error)
+	nodeKey := reg.resolveConfigNodeKey(serviceName)
+	if nodeKey != "" {
+		nodeData, err := fetchRemoteByKey(reg, nodeKey)
+		if err == nil {
+			if err := mergeLayer(merged, nodeData, reg.configFormat()); err != nil {
+				return fmt.Errorf("remote config: merge node: %w", err)
+			}
+			log.Info("remote config: node override applied", "key", nodeKey)
+		}
+		// missing node key is fine — just skip
+	}
+
+	if err := merged.Unmarshal(base); err != nil {
+		return fmt.Errorf("remote config: unmarshal merged: %w", err)
+	}
+	return nil
+}
+
+// ── fetch by key ──
+
+func fetchRemoteByKey(reg RegistryConfig, key string) ([]byte, error) {
+	switch reg.registryType() {
 	case "etcd":
-		return fetchEtcd(src)
+		return fetchEtcd(reg, key)
 	case "consul":
-		return fetchConsul(src)
+		return fetchConsul(reg, key)
 	default:
-		return nil, fmt.Errorf("remote config: unsupported type %q", src.Type)
+		return nil, fmt.Errorf("remote config: unsupported type %q", reg.Type)
 	}
 }
 
 // ── etcd ──
 
-func etcdClient(src RemoteConfig) (*clientv3.Client, error) {
-	if len(src.Endpoints) == 0 {
+func remoteEtcdClient(reg RegistryConfig) (*clientv3.Client, error) {
+	if len(reg.Endpoints) == 0 {
 		return nil, fmt.Errorf("remote config: no etcd endpoints")
 	}
 	return clientv3.New(clientv3.Config{
-		Endpoints:   src.Endpoints,
+		Endpoints:   reg.Endpoints,
 		DialTimeout: 5 * time.Second,
 	})
 }
 
-func fetchEtcd(src RemoteConfig) ([]byte, error) {
-	cli, err := etcdClient(src)
+func fetchEtcd(reg RegistryConfig, key string) ([]byte, error) {
+	cli, err := remoteEtcdClient(reg)
 	if err != nil {
 		return nil, err
 	}
@@ -89,24 +166,24 @@ func fetchEtcd(src RemoteConfig) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	resp, err := cli.Get(ctx, src.Key)
+	resp, err := cli.Get(ctx, key)
 	if err != nil {
-		return nil, fmt.Errorf("remote config: etcd get %q: %w", src.Key, err)
+		return nil, fmt.Errorf("remote config: etcd get %q: %w", key, err)
 	}
 	if len(resp.Kvs) == 0 {
-		return nil, fmt.Errorf("remote config: etcd key %q not found", src.Key)
+		return nil, fmt.Errorf("remote config: etcd key %q not found", key)
 	}
 	return resp.Kvs[0].Value, nil
 }
 
-func watchEtcd(ctx context.Context, src RemoteConfig, onChange func([]byte)) error {
-	cli, err := etcdClient(src)
+func watchEtcd(ctx context.Context, reg RegistryConfig, key string, onChange func([]byte)) error {
+	cli, err := remoteEtcdClient(reg)
 	if err != nil {
 		return err
 	}
 	defer cli.Close()
 
-	ch := cli.Watch(ctx, src.Key)
+	ch := cli.Watch(ctx, key)
 	for resp := range ch {
 		for _, ev := range resp.Events {
 			if ev.Kv != nil && ev.Kv.Value != nil {
@@ -119,39 +196,39 @@ func watchEtcd(ctx context.Context, src RemoteConfig, onChange func([]byte)) err
 
 // ── consul ──
 
-func consulClient(src RemoteConfig) (*consul.Client, error) {
-	addr := src.Address
-	if addr == "" && len(src.Endpoints) > 0 {
-		addr = src.Endpoints[0]
+func remoteConsulClient(reg RegistryConfig) (*consul.Client, error) {
+	addr := reg.Address
+	if addr == "" && len(reg.Endpoints) > 0 {
+		addr = reg.Endpoints[0]
 	}
 	if addr == "" {
 		return nil, fmt.Errorf("remote config: no consul address")
 	}
 	cfg := consul.DefaultConfig()
 	cfg.Address = addr
-	if src.Token != "" {
-		cfg.Token = src.Token
+	if reg.Token != "" {
+		cfg.Token = reg.Token
 	}
 	return consul.NewClient(cfg)
 }
 
-func fetchConsul(src RemoteConfig) ([]byte, error) {
-	cli, err := consulClient(src)
+func fetchConsul(reg RegistryConfig, key string) ([]byte, error) {
+	cli, err := remoteConsulClient(reg)
 	if err != nil {
 		return nil, err
 	}
-	pair, _, err := cli.KV().Get(src.Key, nil)
+	pair, _, err := cli.KV().Get(key, nil)
 	if err != nil {
-		return nil, fmt.Errorf("remote config: consul get %q: %w", src.Key, err)
+		return nil, fmt.Errorf("remote config: consul get %q: %w", key, err)
 	}
 	if pair == nil {
-		return nil, fmt.Errorf("remote config: consul key %q not found", src.Key)
+		return nil, fmt.Errorf("remote config: consul key %q not found", key)
 	}
 	return pair.Value, nil
 }
 
-func watchConsul(ctx context.Context, src RemoteConfig, onChange func([]byte)) error {
-	cli, err := consulClient(src)
+func watchConsul(ctx context.Context, reg RegistryConfig, key string, onChange func([]byte)) error {
+	cli, err := remoteConsulClient(reg)
 	if err != nil {
 		return err
 	}
@@ -164,9 +241,9 @@ func watchConsul(ctx context.Context, src RemoteConfig, onChange func([]byte)) e
 		default:
 		}
 
-		pair, meta, err := cli.KV().Get(src.Key, &consul.QueryOptions{
+		pair, meta, err := cli.KV().Get(key, &consul.QueryOptions{
 			WaitIndex: lastIndex,
-			WaitTime:  55 * time.Second, // consul long-poll
+			WaitTime:  55 * time.Second,
 		})
 		if err != nil {
 			log.Warn("remote config: consul watch error, retrying", "error", err)
@@ -180,7 +257,7 @@ func watchConsul(ctx context.Context, src RemoteConfig, onChange func([]byte)) e
 	}
 }
 
-// ── unmarshal helper ──
+// ── unmarshal / merge helpers ──
 
 func unmarshalBytes(data []byte, format string, cfg any) error {
 	v := viper.New()
@@ -194,17 +271,11 @@ func unmarshalBytes(data []byte, format string, cfg any) error {
 	return nil
 }
 
-// MergeRemoteConfig loads config from a remote source and merges it into
-// an existing Config. Remote values override local ones.
-func MergeRemoteConfig(src RemoteConfig, base *Config) error {
-	data, err := fetchRemote(src)
-	if err != nil {
-		return err
+func mergeLayer(v *viper.Viper, data []byte, format string) error {
+	layer := viper.New()
+	layer.SetConfigType(format)
+	if err := layer.ReadConfig(bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("parse %s: %w", format, err)
 	}
-	// Re-encode base to JSON, decode remote on top of it
-	buf, _ := json.Marshal(base)
-	if err := json.Unmarshal(buf, base); err != nil {
-		return err
-	}
-	return unmarshalBytes(data, src.format(), base)
+	return v.MergeConfigMap(layer.AllSettings())
 }

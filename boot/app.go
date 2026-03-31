@@ -18,6 +18,10 @@ import (
 	"gorm.io/gorm"
 )
 
+// ConfigChangeFunc is called when remote config changes.
+// It receives the updated Config; return an error to reject the update.
+type ConfigChangeFunc func(cfg *Config) error
+
 // App is the central service instance holding all shared resources.
 type App struct {
 	Config   *Config
@@ -27,9 +31,11 @@ type App struct {
 	GRPC     *grpc.Server
 	Registry registry.Registry
 
-	instanceID string
-	onStart    []func()
-	onClose    []func()
+	instanceID     string
+	onStart        []func()
+	onClose        []func()
+	onConfigChange []ConfigChangeFunc
+	watchCancel    context.CancelFunc
 }
 
 // SetupFunc is called during Run to register routes, stores, gRPC services, etc.
@@ -42,9 +48,9 @@ func New(cfgPath string) (*App, error) {
 		return nil, err
 	}
 
-	// Merge remote config (etcd/consul KV) if enabled
-	if cfg.Remote.Enable {
-		if err := MergeRemoteConfig(cfg.Remote, cfg); err != nil {
+	// Merge remote config from registry backend if configKey is set
+	if cfg.Registry.ConfigKey != "" && (len(cfg.Registry.Endpoints) > 0 || cfg.Registry.Address != "") {
+		if err := MergeRemoteConfig(cfg.Registry, cfg.Server.Name, cfg); err != nil {
 			return nil, fmt.Errorf("remote config: %w", err)
 		}
 	}
@@ -115,6 +121,13 @@ func (a *App) OnStart(fn func()) { a.onStart = append(a.onStart, fn) }
 // OnClose registers a callback invoked during graceful shutdown.
 func (a *App) OnClose(fn func()) { a.onClose = append(a.onClose, fn) }
 
+// OnConfigChange registers a callback invoked when remote config changes.
+// The callback receives the new Config. Return an error to reject the update
+// (Config will not be replaced). Multiple callbacks run in order.
+func (a *App) OnConfigChange(fn ConfigChangeFunc) {
+	a.onConfigChange = append(a.onConfigChange, fn)
+}
+
 // Run starts the HTTP server (and optional gRPC server), calls setup,
 // then blocks until SIGINT/SIGTERM.
 func (a *App) Run(setup SetupFunc) error {
@@ -152,6 +165,13 @@ func (a *App) Run(setup SetupFunc) error {
 		}
 	}
 
+	// Start remote config watcher if enabled
+	if a.Config.Registry.ConfigKey != "" && (len(a.Config.Registry.Endpoints) > 0 || a.Config.Registry.Address != "") {
+		watchCtx, watchCancel := context.WithCancel(context.Background())
+		a.watchCancel = watchCancel
+		go a.watchRemoteConfig(watchCtx)
+	}
+
 	// Start HTTP
 	srv := &http.Server{Addr: a.Config.Server.Addr, Handler: a.Gin}
 	quit := make(chan os.Signal, 1)
@@ -171,6 +191,11 @@ func (a *App) Run(setup SetupFunc) error {
 
 	<-quit
 	log.Info("shutting down...")
+
+	// Stop config watcher
+	if a.watchCancel != nil {
+		a.watchCancel()
+	}
 
 	for _, fn := range a.onClose {
 		fn()
@@ -206,4 +231,36 @@ func (a *App) Run(setup SetupFunc) error {
 
 	log.Info("server exited")
 	return nil
+}
+
+// watchRemoteConfig watches the remote config key and applies changes.
+func (a *App) watchRemoteConfig(ctx context.Context) {
+	reg := a.Config.Registry
+	serviceName := a.Config.Server.Name
+	format := reg.configFormat()
+
+	log.Info("remote config: watching for changes", "key", reg.resolveConfigKey(serviceName))
+
+	err := WatchRemoteConfig(ctx, reg, serviceName, func(data []byte) {
+		// Parse into a fresh Config, starting from current as base
+		newCfg := *a.Config
+		if err := unmarshalBytes(data, format, &newCfg); err != nil {
+			log.Error("remote config: failed to parse update", "error", err)
+			return
+		}
+
+		// Run all OnConfigChange callbacks; any error rejects the update
+		for _, fn := range a.onConfigChange {
+			if err := fn(&newCfg); err != nil {
+				log.Warn("remote config: update rejected by callback", "error", err)
+				return
+			}
+		}
+
+		a.Config = &newCfg
+		log.Info("remote config: config updated")
+	})
+	if err != nil && ctx.Err() == nil {
+		log.Error("remote config: watch stopped unexpectedly", "error", err)
+	}
 }
