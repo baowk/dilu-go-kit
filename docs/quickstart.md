@@ -13,6 +13,7 @@ go get github.com/baowk/dilu-go-kit@latest
 ```
 my-service/
   cmd/main.go
+  migrations/
   internal/xxx/
     model/        <- 手写结构体（gorm tag，一张表一个文件）
       task.go
@@ -58,7 +59,14 @@ func main() {
         store.Init(a.DB("main"))
         mid.Default(a.Gin, mid.DefaultConfig{
             CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
-            AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
+            AccessLimit: mid.AccessLimitCfg{
+                Enable: true,
+                Total: 300,
+                Duration: 5,
+                Backend: "redis",
+                Redis: a.Redis,
+                KeyPrefix: "my-service:ratelimit",
+            },
         })
         router.Init(a.Gin, a.Config.JWT.Secret)
         return nil
@@ -104,6 +112,14 @@ registry:
   endpoints:
     - "127.0.0.1:2379"
   # configKey: "/config/"   # 启用远程配置（自动拼 server.name）
+```
+
+### 3.1 数据库迁移
+
+```bash
+go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations create -name init
+DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/my_service?sslmode=disable' \
+  go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations up
 ```
 
 ### 4. Model
@@ -248,6 +264,7 @@ func Init(r *gin.Engine, jwtSecret string) {
     api := &apis.TaskAPI{}
     // JWT secret 从 boot.Config 读取，在 main.go 传入或从配置获取
     auth := r.Group("/v1/tasks").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
+    // Handler 中可通过 mid.GetUID/GetTenantID/GetShopIDs/GetScopes 获取身份上下文
     {
         auth.GET("", api.List)
     }

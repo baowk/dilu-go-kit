@@ -39,3 +39,31 @@ func TestRateLimiterCloseIsIdempotent(t *testing.T) {
 	limiter.Close()
 	limiter.Close()
 }
+
+func TestRateLimitFromConfigFallsBackToMemoryWithoutRedisClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.Use(RateLimitFromConfig(AccessLimitCfg{
+		Enable:   true,
+		Total:    1,
+		Duration: 60,
+		Backend:  "redis",
+	}))
+	r.GET("/x", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first status = %d", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d", w.Code)
+	}
+}

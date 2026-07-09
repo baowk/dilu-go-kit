@@ -3,6 +3,7 @@ package mid
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -104,6 +105,88 @@ func TestJWTAcceptsValidHMACToken(t *testing.T) {
 	}
 }
 
+func TestJWTExtractsTenantShopAndScopesFromClaims(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.Use(JWT(JWTConfig{Secret: "secret"}))
+	r.GET("/me", func(c *gin.Context) {
+		if GetTenantID(c) != 9 {
+			t.Fatalf("tenant_id = %d", GetTenantID(c))
+		}
+		if !reflect.DeepEqual(GetShopIDs(c), []int64{1, 2, 3}) {
+			t.Fatalf("shop_ids = %#v", GetShopIDs(c))
+		}
+		if !reflect.DeepEqual(GetScopes(c), []string{"order.read", "order.write"}) {
+			t.Fatalf("scopes = %#v", GetScopes(c))
+		}
+		c.String(http.StatusOK, "ok")
+	})
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"uid":       float64(42),
+		"tenant_id": float64(9),
+		"shop_ids":  []any{float64(1), "2", float64(3)},
+		"scopes":    "order.read, order.write",
+	})
+	tokenStr, err := token.SignedString([]byte("secret"))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if got := w.Body.String(); got != "ok" {
+		t.Fatalf("expected ok, got %q", got)
+	}
+}
+
+func TestJWTTrustsTenantShopAndScopesHeadersWhenUIDTrusted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.Use(JWT(JWTConfig{
+		Secret:         "secret",
+		HeaderUID:      "x-user-id",
+		HeaderTenantID: "x-tenant-id",
+		HeaderShopIDs:  "x-shop-ids",
+		HeaderScopes:   "x-scopes",
+		TrustHeaderUID: true,
+	}))
+	r.GET("/me", func(c *gin.Context) {
+		if GetUID(c) != 42 {
+			t.Fatalf("uid = %d", GetUID(c))
+		}
+		if GetTenantID(c) != 9 {
+			t.Fatalf("tenant_id = %d", GetTenantID(c))
+		}
+		if !reflect.DeepEqual(GetShopIDs(c), []int64{1, 2}) {
+			t.Fatalf("shop_ids = %#v", GetShopIDs(c))
+		}
+		if !reflect.DeepEqual(GetScopes(c), []string{"order.read", "inventory.write"}) {
+			t.Fatalf("scopes = %#v", GetScopes(c))
+		}
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("x-user-id", "42")
+	req.Header.Set("x-tenant-id", "9")
+	req.Header.Set("x-shop-ids", "1,2")
+	req.Header.Set("x-scopes", "order.read,inventory.write")
+	w := httptest.NewRecorder()
+
+	r.ServeHTTP(w, req)
+
+	if got := w.Body.String(); got != "ok" {
+		t.Fatalf("expected ok, got %q", got)
+	}
+}
+
 func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -121,6 +204,15 @@ func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
 		if GetPhone(c) != "" {
 			t.Fatalf("GetPhone trusted request header")
 		}
+		if GetTenantID(c) != 0 {
+			t.Fatalf("GetTenantID trusted request header")
+		}
+		if GetShopIDs(c) != nil {
+			t.Fatalf("GetShopIDs trusted request header")
+		}
+		if GetScopes(c) != nil {
+			t.Fatalf("GetScopes trusted request header")
+		}
 		c.Status(http.StatusNoContent)
 	})
 
@@ -129,6 +221,9 @@ func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
 	req.Header.Set("a_rid", "1")
 	req.Header.Set("a_nickname", "admin")
 	req.Header.Set("a_mobile", "13800000000")
+	req.Header.Set("x-tenant-id", "9")
+	req.Header.Set("x-shop-ids", "1,2")
+	req.Header.Set("x-scopes", "order.read")
 	w := httptest.NewRecorder()
 
 	r.ServeHTTP(w, req)

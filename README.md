@@ -9,6 +9,9 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 - **mid** — 可配置中间件（Trace + Recovery + Logger + ErrorHandler + JWT + CORS + RateLimit）
 - **resp** — 统一 HTTP 响应（Ok / Fail / Page / Error）+ 标准错误码
 - **store** — 数据访问层基础类型（ListOpts 分页）
+- **stream** — Redis Stream 基础封装（发布、消费组、读取、ACK、死信）
+- **clientx** — 服务客户端基础能力（重试、熔断、gRPC 错误码映射）
+- **migratex** — PostgreSQL SQL 迁移封装（up/down/version/force/create）
 - **registry** — 服务注册与发现（etcd / consul）
 - **notify** — 通用 HTTP 事件推送（支持 traceId 透传）
 
@@ -59,6 +62,9 @@ log/        统一日志接口（Logger 接口 + slog 实现 + traceId + lumberj
 mid/        中间件（Trace/Recovery/Logger/ErrorHandler/JWT/CORS/RateLimit/Default/gRPC interceptor）
 resp/       统一 HTTP 响应 + 标准错误码
 store/      数据访问基础类型（ListOpts）
+stream/     Redis Stream 基础封装
+clientx/    服务客户端重试、熔断、错误码映射
+migratex/   PostgreSQL SQL 迁移封装
 registry/   服务注册与发现（etcd / consul）
 notify/     通用事件推送
 example/    完整示例服务
@@ -104,14 +110,30 @@ r.Use(mid.Logger())        // 请求日志（method/path/status/latency/traceId�
 r.Use(mid.CORS())          // CORS（支持 whitelist）
 r.Use(mid.RateLimit(100, time.Minute))  // 限流
 
+// 可配置限流：默认 memory；传 Redis client 后可切换分布式限流
+r.Use(mid.RateLimitFromConfig(mid.AccessLimitCfg{
+    Enable: true,
+    Total: 300,
+    Duration: 5,
+    Backend: "redis",
+    Redis: app.Redis,
+    KeyPrefix: "gateway:ratelimit",
+}))
+
 // JWT 认证
 auth := r.Group("/v1").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
 uid := mid.GetUID(c)
+tenantID := mid.GetTenantID(c)
+shopIDs := mid.GetShopIDs(c)
+scopes := mid.GetScopes(c)
 nickname := mid.GetNickname(c)
 
 // 仅在可信网关已剥离外部身份头时开启 HeaderUID 信任模式
 r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
-    HeaderUID:      "a_uid",
+    HeaderUID:      "x-user-id",
+    HeaderTenantID: "x-tenant-id",
+    HeaderShopIDs:  "x-shop-ids", // "1,2,3"
+    HeaderScopes:   "x-scopes",   // "order.read,order.write"
     TrustHeaderUID: true,
 }))
 
@@ -124,7 +146,31 @@ gRPC 客户端默认明文，仅适合可信内网；跨网络或零信任环境
 ```go
 conn, _ := grpcx.Dial(addr, grpcx.DialOption{
     TLSConfig: &tls.Config{ServerName: "mf-user.internal"},
+    RetryMaxAttempts: 3,
 })
+```
+
+## 服务客户端
+
+```go
+import "github.com/baowk/dilu-go-kit/clientx"
+
+breaker := clientx.NewBreaker(clientx.BreakerConfig{
+    FailureThreshold: 5,
+    Cooldown: 30 * time.Second,
+})
+
+err := breaker.Do(ctx, func(ctx context.Context) error {
+    return clientx.Do(ctx, clientx.RetryConfig{MaxAttempts: 3}, func(ctx context.Context) error {
+        // call downstream service
+        return nil
+    })
+})
+if err != nil {
+    err = clientx.MapGRPCError(err)
+    code := clientx.CodeOf(err)
+    _ = code
+}
 ```
 
 ## 标准错误码
@@ -146,6 +192,46 @@ import "github.com/baowk/dilu-go-kit/notify"
 notify.Init("http://mf-ws:9020")
 notify.Send("env", map[string]any{"action": "created", "env_id": 123, "workspace_id": 1})
 notify.SendContext(ctx, "proxy", payload)  // 自动携带 traceId
+```
+
+## Redis Stream
+
+```go
+import "github.com/baowk/dilu-go-kit/stream"
+
+_ = stream.EnsureGroup(ctx, app.Redis, "sync.tasks", "sync-worker", "0")
+
+id, err := stream.Publish(ctx, app.Redis, "sync.tasks", map[string]any{
+    "task_id": "123",
+    "type": "order_pull",
+})
+
+msgs, err := stream.ReadGroup(ctx, app.Redis, stream.ReaderConfig{
+    Stream: "sync.tasks",
+    Group: "sync-worker",
+    Consumer: "worker-1",
+})
+for _, msg := range msgs {
+    // handle message idempotently
+    _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
+}
+```
+
+## 数据库迁移
+
+推荐每个服务独立维护 `migrations/`：
+
+```text
+services/order-service/
+  migrations/
+    20260709120000_init.up.sql
+    20260709120000_init.down.sql
+```
+
+```bash
+go run github.com/baowk/dilu-go-kit/cmd/migrate -dir services/order-service/migrations create -name init
+DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
+  go run github.com/baowk/dilu-go-kit/cmd/migrate -dir services/order-service/migrations up
 ```
 
 ## 服务注册与发现

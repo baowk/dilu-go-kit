@@ -5,6 +5,7 @@
 ```
 my-service/
   cmd/main.go                       <- 入口
+  migrations/                       <- SQL migrations，一组 up/down 文件
   internal/{module}/
     model/                          <- 手写结构体（一张表一个文件）
       task.go
@@ -32,6 +33,34 @@ my-service/
 ```
 
 ## 二、数据访问层
+
+### 数据库迁移
+
+每个服务必须独立维护自己的 `migrations/` 目录，不共享其他服务迁移。
+
+命名：
+
+```text
+migrations/
+  20260709120000_init.up.sql
+  20260709120000_init.down.sql
+  20260709121000_add_order_status.up.sql
+  20260709121000_add_order_status.down.sql
+```
+
+命令：
+
+```bash
+go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations create -name init
+DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
+  go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations up
+```
+
+规则：
+- 所有 DDL 通过 migration 进入仓库，不允许只依赖 GORM AutoMigrate。
+- 每个 `.up.sql` 必须有对应 `.down.sql`。
+- 生产环境执行前必须先在 staging 验证。
+- dirty 状态只能由负责人确认后使用 `force` 修复。
 
 ### 文件拆分硬约束
 
@@ -175,6 +204,14 @@ r.Use(mid.ErrorHandler())   // AppError panic 捕获
 r.Use(mid.Logger())         // 请求日志（method/path/status/latency/traceId）
 r.Use(mid.CORS())           // CORS（支持 whitelist）
 r.Use(mid.RateLimit(100, time.Minute))
+r.Use(mid.RateLimitFromConfig(mid.AccessLimitCfg{
+    Enable: true,
+    Total: 300,
+    Duration: 5,
+    Backend: "redis",              // memory（默认）或 redis
+    Redis: app.Redis,              // nil 时自动回退 memory
+    KeyPrefix: "gateway:ratelimit",
+}))
 limiter := mid.NewRateLimiter(100, time.Minute) // 需要显式生命周期时
 r.Use(limiter.Middleware())
 // app.OnClose(limiter.Close)
@@ -186,19 +223,54 @@ auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
 
 // 仅在可信网关已剥离外部身份头时开启 HeaderUID 信任模式
 r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
-    HeaderUID:      "a_uid",
+    HeaderUID:      "x-user-id",
+    HeaderTenantID: "x-tenant-id",
+    HeaderShopIDs:  "x-shop-ids",
+    HeaderScopes:   "x-scopes",
     TrustHeaderUID: true,
 }))
 
 // 获取用户信息
 uid := mid.GetUID(c)            // int64
+tenantID := mid.GetTenantID(c)  // int64
+shopIDs := mid.GetShopIDs(c)    // []int64
+scopes := mid.GetScopes(c)      // []string
 nickname := mid.GetNickname(c)  // string
 roleID := mid.GetRoleID(c)     // int
 phone := mid.GetPhone(c)       // string
 
 // gRPC traceId 透传
-conn, _ := grpc.NewClient(addr, grpc.WithUnaryInterceptor(mid.GRPCUnaryClientInterceptor()))
+conn, _ := grpcx.Dial(addr, grpcx.DialOption{
+    RetryMaxAttempts: 3,
+})
 ```
+
+### 服务客户端
+
+```go
+import "github.com/baowk/dilu-go-kit/clientx"
+
+breaker := clientx.NewBreaker(clientx.BreakerConfig{
+    FailureThreshold: 5,
+    Cooldown: 30 * time.Second,
+})
+
+err := breaker.Do(ctx, func(ctx context.Context) error {
+    return clientx.Do(ctx, clientx.RetryConfig{MaxAttempts: 3}, func(ctx context.Context) error {
+        // 调用下游服务
+        return nil
+    })
+})
+if err != nil {
+    err = clientx.MapGRPCError(err)
+}
+```
+
+**规则**：
+- 调用下游服务必须设置超时，由调用方 context 控制。
+- 可重试操作必须保证幂等。
+- 熔断打开时应返回 `resp.CodeServiceDown` 或进入异常处理。
+- gRPC 错误返回前统一用 `clientx.MapGRPCError` 映射。
 
 ### 日志
 
@@ -221,6 +293,29 @@ import "github.com/baowk/dilu-go-kit/notify"
 notify.Init("http://mf-ws:9020")
 notify.Send("env", map[string]any{"action": "created", "env_id": 123})
 notify.SendContext(ctx, "proxy", payload)  // 携带 traceId
+```
+
+### Redis Stream
+
+```go
+import "github.com/baowk/dilu-go-kit/stream"
+
+_ = stream.EnsureGroup(ctx, app.Redis, "sync.tasks", "sync-worker", "0")
+
+_, err := stream.Publish(ctx, app.Redis, "sync.tasks", map[string]any{
+    "task_id": "123",
+    "type": "order_pull",
+})
+
+msgs, err := stream.ReadGroup(ctx, app.Redis, stream.ReaderConfig{
+    Stream:   "sync.tasks",
+    Group:    "sync-worker",
+    Consumer: "worker-1",
+})
+for _, msg := range msgs {
+    // 消费端必须先检查业务幂等键
+    _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
+}
 ```
 
 ## 五、配置
