@@ -1,4 +1,4 @@
-# dilu-go-kit — Claude Code 项目约定
+# dilu-go-kit — Codex 项目约定
 
 ## 本仓库结构
 
