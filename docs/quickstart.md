@@ -13,11 +13,23 @@ go get github.com/baowk/dilu-go-kit@latest
 ```
 my-service/
   cmd/main.go
-  internal/modules/xxx/
-    model/        <- 手写结构体（gorm tag）
-    store/        <- Store 接口 + PG 实现
-    service/      <- 业务逻辑
-    apis/         <- HTTP handler
+  internal/xxx/
+    model/        <- 手写结构体（gorm tag，一张表一个文件）
+      task.go
+      task_comment.go
+    store/        <- Store 接口 + PG 实现（一张表一个 *_pg.go）
+      store.go    <- 只放 Stores 聚合、Init、S
+      task_pg.go
+      task_comment_pg.go
+    service/      <- 业务逻辑（一类资源一个文件）
+      task.go
+      task_comment.go
+    service/dto/  <- 请求/响应 DTO（一类资源一个文件）
+      task.go
+      task_comment.go
+    apis/         <- HTTP handler（一类资源一个文件）
+      task_api.go
+      task_comment_api.go
     router/       <- 路由注册
   resources/config.dev.yaml
   go.mod
@@ -33,8 +45,8 @@ import (
     "log"
     "github.com/baowk/dilu-go-kit/boot"
     "github.com/baowk/dilu-go-kit/mid"
-    "my-service/internal/modules/xxx/router"
-    "my-service/internal/modules/xxx/store"
+    "my-service/internal/xxx/router"
+    "my-service/internal/xxx/store"
 )
 
 func main() {
@@ -48,7 +60,7 @@ func main() {
             CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
             AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
         })
-        router.Init(a.Gin)
+        router.Init(a.Gin, a.Config.JWT.Secret)
         return nil
     })
 }
@@ -60,7 +72,8 @@ func main() {
 # resources/config.dev.yaml
 server:
   name: my-service
-  addr: ":8080"
+  addr: ":8080"                  # 监听地址
+  # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug
 
 # log:                        # 默认 console 输出，可选 file / both
@@ -71,7 +84,7 @@ server:
 
 database:
   main:
-    dsn: "host=127.0.0.1 user=postgres dbname=mydb sslmode=disable"
+    dsn: ""                  # 建议用 DATABASE_MAIN_DSN / DATABASE_DSN 注入
     maxIdle: 10
     maxOpen: 50
     maxLifetime: 3600
@@ -80,6 +93,7 @@ database:
 
 redis:
   addr: "127.0.0.1:6379"
+  password: ""               # 建议用 REDIS_PASSWORD 注入
 
 grpc:
   enable: false
@@ -95,7 +109,7 @@ registry:
 ### 4. Model
 
 ```go
-// internal/modules/xxx/model/task.go
+// internal/xxx/model/task.go
 package model
 
 import "time"
@@ -111,15 +125,17 @@ type Task struct {
 func (Task) TableName() string { return "task" }
 ```
 
+新增表时不要追加到 `task.go` 或集中到 `model.go`；例如新增 `task_comment` 表，应创建 `model/task_comment.go`。
+
 ### 5. Store
 
 ```go
-// internal/modules/xxx/store/store.go
+// internal/xxx/store/store.go
 package store
 
 import (
     "context"
-    "my-service/internal/modules/xxx/model"
+    "my-service/internal/xxx/model"
     base "github.com/baowk/dilu-go-kit/store"
     "gorm.io/gorm"
 )
@@ -140,13 +156,15 @@ func Init(db *gorm.DB) { s = &Stores{Task: &pgTaskStore{db: db}} }
 func S() *Stores       { return s }
 ```
 
+`store/store.go` 只放聚合和初始化；具体 SQL 实现按表放到 `store/{table}_pg.go`，不要集中写进 `store.go` 或 `store_pg.go`。
+
 ```go
-// internal/modules/xxx/store/task_pg.go
+// internal/xxx/store/task_pg.go
 package store
 
 import (
     "context"
-    "my-service/internal/modules/xxx/model"
+    "my-service/internal/xxx/model"
     base "github.com/baowk/dilu-go-kit/store"
     "gorm.io/gorm"
 )
@@ -188,16 +206,16 @@ func (s *pgTaskStore) Delete(ctx context.Context, id int64) (int64, error) {
 ### 6. API Handler
 
 ```go
-// internal/modules/xxx/apis/task_api.go
+// internal/xxx/apis/task_api.go
 package apis
 
 import (
+    "net/http"
     "strconv"
     "github.com/gin-gonic/gin"
-    "github.com/baowk/dilu-go-kit/mid"
     "github.com/baowk/dilu-go-kit/resp"
     base "github.com/baowk/dilu-go-kit/store"
-    "my-service/internal/modules/xxx/store"
+    "my-service/internal/xxx/store"
 )
 
 type TaskAPI struct{}
@@ -207,7 +225,7 @@ func (a *TaskAPI) List(c *gin.Context) {
     size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
     list, total, err := store.S().Task.List(c, base.ListOpts{Page: page, Size: size})
     if err != nil {
-        resp.Fail(c, resp.CodeDBError, err.Error())
+        resp.FailStatus(c, http.StatusInternalServerError, resp.CodeDBError, "数据库错误")
         return
     }
     resp.Page(c, list, total, page, size)
@@ -217,19 +235,19 @@ func (a *TaskAPI) List(c *gin.Context) {
 ### 7. Router
 
 ```go
-// internal/modules/xxx/router/router.go
+// internal/xxx/router/router.go
 package router
 
 import (
     "github.com/gin-gonic/gin"
     "github.com/baowk/dilu-go-kit/mid"
-    "my-service/internal/modules/xxx/apis"
+    "my-service/internal/xxx/apis"
 )
 
-func Init(r *gin.Engine) {
+func Init(r *gin.Engine, jwtSecret string) {
     api := &apis.TaskAPI{}
     // JWT secret 从 boot.Config 读取，在 main.go 传入或从配置获取
-    auth := r.Group("/v1/tasks").Use(mid.JWT(mid.JWTConfig{Secret: "your-secret", HeaderUID: "a_uid"}))
+    auth := r.Group("/v1/tasks").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
     {
         auth.GET("", api.List)
     }
@@ -241,7 +259,14 @@ func Init(r *gin.Engine) {
 ```bash
 go run cmd/main.go
 # => HTTP server started on :8080
-# => registry: registered service=my-service addr=:8080
+# => registry: registered service=my-service addr=10.0.1.5:8080
+```
+
+多节点运行可用环境变量区分：
+
+```bash
+REMOTE_NODE=node-1 SERVER_ADDR=:7801 SERVER_ADVERTISE_ADDR=10.0.1.5:7801 DATABASE_MAIN_DSN='...' JWT_SECRET='...' ./my-service
+REMOTE_NODE=node-2 SERVER_ADDR=:7802 SERVER_ADVERTISE_ADDR=10.0.1.6:7802 DATABASE_MAIN_DSN='...' JWT_SECRET='...' ./my-service
 ```
 
 ## 完整示例

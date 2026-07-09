@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/model"
+	"github.com/baowk/dilu-go-kit/example/internal/demo/model"
 	base "github.com/baowk/dilu-go-kit/store"
 	"gorm.io/gorm"
 )

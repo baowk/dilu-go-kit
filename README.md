@@ -105,12 +105,26 @@ r.Use(mid.CORS())          // CORS（支持 whitelist）
 r.Use(mid.RateLimit(100, time.Minute))  // 限流
 
 // JWT 认证
-auth := r.Group("/v1").Use(mid.JWT(mid.JWTConfig{Secret: "xxx", HeaderUID: "a_uid"}))
+auth := r.Group("/v1").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
 uid := mid.GetUID(c)
 nickname := mid.GetNickname(c)
 
+// 仅在可信网关已剥离外部身份头时开启 HeaderUID 信任模式
+r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
+    HeaderUID:      "a_uid",
+    TrustHeaderUID: true,
+}))
+
 // gRPC traceId 透传
 conn, _ := grpc.NewClient(addr, grpc.WithUnaryInterceptor(mid.GRPCUnaryClientInterceptor()))
+```
+
+gRPC 客户端默认明文，仅适合可信内网；跨网络或零信任环境请传 TLS：
+
+```go
+conn, _ := grpcx.Dial(addr, grpcx.DialOption{
+    TLSConfig: &tls.Config{ServerName: "mf-user.internal"},
+})
 ```
 
 ## 标准错误码
@@ -121,6 +135,7 @@ resp.Fail(c, resp.CodeForbidden, "无权操作")     // 40301
 resp.Fail(c, resp.CodeInvalidParam, "参数错误")  // 40001
 resp.Fail(c, resp.CodeNotFound, "不存在")        // 40401
 resp.Fail(c, resp.CodeInternal, "服务错误")      // 50000
+resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 ```
 
 ## 事件通知
@@ -181,23 +196,53 @@ app.OnConfigChange(func(cfg *boot.Config) error {
 })
 ```
 
+同一服务多实例可用节点级配置区分：
+
+```bash
+REMOTE_NODE=node-1 SERVER_ADDR=:7801 SERVER_ADVERTISE_ADDR=10.0.1.5:7801 ./my-service
+REMOTE_NODE=node-2 SERVER_ADDR=:7802 SERVER_ADVERTISE_ADDR=10.0.1.6:7802 ./my-service
+```
+
+对应 KV：
+
+```text
+/config/mf-user        # 服务级共享配置
+/config/mf-user/node-1 # node-1 覆盖
+/config/mf-user/node-2 # node-2 覆盖
+```
+
+## 敏感配置
+
+密码、token、JWT secret 不建议写入 YAML 或远程配置。可用环境变量覆盖，优先级高于本地和远程配置：
+
+```bash
+DATABASE_DSN='host=... user=... password=... dbname=...'
+DATABASE_MAIN_DSN='host=... user=... password=... dbname=...'
+REDIS_PASSWORD='...'
+JWT_SECRET='...'
+REGISTRY_TOKEN='...'
+NOTIFY_WS_URL='http://mf-ws:9020'
+REMOTE_NODE='node-1'
+```
+
 ## 配置示例
 
 ```yaml
 server:
   name: my-service
-  addr: ":8080"
+  addr: ":8080"                  # 监听地址
+  # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug
 
 database:
   main:
-    dsn: "host=127.0.0.1 user=postgres dbname=mydb sslmode=disable"
+    dsn: ""                    # 建议用 DATABASE_MAIN_DSN / DATABASE_DSN 注入
     slowThreshold: 200
 
 redis:
   addr: "127.0.0.1:6379"
   username: ""                # Redis 6+ ACL（可选）
-  password: ""
+  password: ""                # 建议用 REDIS_PASSWORD 注入
 
 log:
   output: console             # console / file / both
@@ -205,7 +250,7 @@ log:
   #   path: "logs/app.log"
 
 jwt:
-  secret: "your-secret"
+  secret: ""                  # 建议用 JWT_SECRET 注入
   expires: 1440
 
 cors:
@@ -225,6 +270,7 @@ registry:
   type: etcd                  # etcd / consul
   endpoints: ["127.0.0.1:2379"]
   # address: "127.0.0.1:8500"  # consul
+  # token: ""                  # 建议用 REGISTRY_TOKEN 注入
   configKey: "/config/"       # 启用远程配置
   # configNode: "node-1"      # 节点级覆盖
 ```
@@ -249,6 +295,8 @@ curl -sL https://raw.githubusercontent.com/baowk/dilu-go-kit/main/CLAUDE.templat
 
 - [开发规范](docs/conventions.md) — 项目结构、数据层、API、错误码、中间件
 - [快速开始](docs/quickstart.md) — 5 分钟上手
+
+模块拆分特别约束：一张表一个 `model/{table}.go` 和 `store/{table}_pg.go`；一类资源一个 `service/{resource}.go`、`service/dto/{resource}.go`、`apis/{resource}_api.go`。`store/store.go` 只放聚合和初始化，避免 AI 把多个资源写进单个大文件。
 
 ## License
 

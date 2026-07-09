@@ -9,10 +9,12 @@
 package grpcx
 
 import (
+	"crypto/tls"
 	"time"
 
 	"github.com/baowk/dilu-go-kit/mid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
@@ -25,6 +27,10 @@ type DialOption struct {
 	KeepaliveTime time.Duration
 	// KeepaliveTimeout is how long to wait for a ping ack (default 10s)
 	KeepaliveTimeout time.Duration
+	// TLSConfig enables TLS transport credentials.
+	TLSConfig *tls.Config
+	// TransportCredentials overrides TLSConfig/insecure credentials.
+	TransportCredentials credentials.TransportCredentials
 }
 
 var defaultOpts = DialOption{
@@ -37,24 +43,13 @@ var defaultOpts = DialOption{
 // - Automatic reconnection (built-in to gRPC)
 // - TraceId propagation (unary + stream interceptors)
 // - Keepalive pings
-// - Insecure transport (for internal service communication)
+// - Insecure transport by default (for trusted internal service communication)
+// - TLS or custom transport credentials when configured
 func Dial(addr string, opts ...DialOption) (*grpc.ClientConn, error) {
-	opt := defaultOpts
-	if len(opts) > 0 {
-		opt = opts[0]
-		if opt.Timeout == 0 {
-			opt.Timeout = defaultOpts.Timeout
-		}
-		if opt.KeepaliveTime == 0 {
-			opt.KeepaliveTime = defaultOpts.KeepaliveTime
-		}
-		if opt.KeepaliveTimeout == 0 {
-			opt.KeepaliveTimeout = defaultOpts.KeepaliveTimeout
-		}
-	}
+	opt := normalizeDialOption(opts...)
 
 	return grpc.NewClient(addr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(opt.transportCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                opt.KeepaliveTime,
 			Timeout:             opt.KeepaliveTimeout,
@@ -75,4 +70,31 @@ func Dial(addr string, opts ...DialOption) (*grpc.ClientConn, error) {
 		grpc.WithChainUnaryInterceptor(mid.GRPCUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(mid.GRPCStreamClientInterceptor()),
 	)
+}
+
+func normalizeDialOption(opts ...DialOption) DialOption {
+	opt := defaultOpts
+	if len(opts) > 0 {
+		opt = opts[0]
+		if opt.Timeout == 0 {
+			opt.Timeout = defaultOpts.Timeout
+		}
+		if opt.KeepaliveTime == 0 {
+			opt.KeepaliveTime = defaultOpts.KeepaliveTime
+		}
+		if opt.KeepaliveTimeout == 0 {
+			opt.KeepaliveTimeout = defaultOpts.KeepaliveTimeout
+		}
+	}
+	return opt
+}
+
+func (o DialOption) transportCredentials() credentials.TransportCredentials {
+	if o.TransportCredentials != nil {
+		return o.TransportCredentials
+	}
+	if o.TLSConfig != nil {
+		return credentials.NewTLS(o.TLSConfig)
+	}
+	return insecure.NewCredentials()
 }

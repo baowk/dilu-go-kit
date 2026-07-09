@@ -5,7 +5,7 @@
 ## 项目结构
 
 - `cmd/` — 入口
-- `internal/modules/` — 业务模块
+- `internal/` — 业务模块
 - `resources/` — 配置文件
 
 ## 技术栈
@@ -20,16 +20,30 @@
 每个业务模块的目录结构：
 
 ```
-internal/modules/{module}/
+internal/{module}/
   model/    ← 手写结构体（gorm tag，一张表一个文件，必须有 TableName()）
   store/    ← Store 接口 + PG 实现 + Init(db)/S()
-  service/  ← 业务逻辑（只通过 store 接口访问数据，禁止直接用 gorm.DB）
-  apis/     ← HTTP handler（用 resp.Ok/Fail/Page 返回）
+  service/  ← 业务逻辑（一类资源一个文件，只通过 store 接口访问数据）
+    dto/    ← 请求/响应 DTO（一类资源一个文件）
+  apis/     ← HTTP handler（一类资源一个文件，用 resp.Ok/Fail/Page 返回）
   router/   ← 路由注册
 ```
 
+### 文件拆分硬约束
+
+AI 写代码时必须按表/资源拆文件，避免生成巨大的 `model.go` / `store.go` / `service.go` / `apis.go`：
+
+- 每张表一个 `model/{table}.go`，只放该表结构体和 `TableName()`。
+- 每张表一个 `store/{table}_pg.go`，只放该表 PG 实现。
+- `store/store.go` 只放 Store 聚合、`Init(db)`、`S()`。
+- 每类资源一个 `service/{resource}.go`、`service/dto/{resource}.go`、`apis/{resource}_api.go`。
+- 新增资源时新增整组文件，例如 `model/task_comment.go` + `store/task_comment_pg.go` + `service/task_comment.go` + `service/dto/task_comment.go` + `apis/task_comment_api.go`。
+
 **禁止**：
 - 禁止 service 层直接使用 `gorm.DB`
+- 禁止把多个表的 model 集中写进 `model/model.go`
+- 禁止把多个表的 PG 查询集中写进 `store/store.go`、`store_pg.go` 或 `repository.go`
+- 禁止把多个资源的业务逻辑、DTO、handler 集中写进 `service/service.go`、`service/dto/dto.go` 或 `apis/apis.go`
 - 禁止在代码中硬编码 Redis key
 - 分区表查询必须带分区键
 
@@ -51,7 +65,7 @@ import (
 )
 
 mid.Default(a.Gin, mid.DefaultConfig{...})  // 一行注册全部中间件
-auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{Secret: "...", HeaderUID: "a_uid"}))
+auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
 uid := mid.GetUID(c)
 resp.Ok(c, data)
 resp.Fail(c, resp.CodeUnauthorized, "未登录")

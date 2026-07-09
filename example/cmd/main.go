@@ -4,8 +4,8 @@ import (
 	"log"
 
 	"github.com/baowk/dilu-go-kit/boot"
-	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/router"
-	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/store"
+	"github.com/baowk/dilu-go-kit/example/internal/demo/router"
+	"github.com/baowk/dilu-go-kit/example/internal/demo/store"
 	"github.com/baowk/dilu-go-kit/mid"
 )
 
@@ -23,7 +23,7 @@ func main() {
 		a.Gin.Use(mid.Recovery(), mid.CORS())
 
 		// Routes
-		router.Init(a.Gin, "your-jwt-secret")
+		router.Init(a.Gin, a.Config.JWT.Secret)
 
 		return nil
 	}); err != nil {

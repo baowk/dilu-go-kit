@@ -42,6 +42,11 @@ func Fail(c *gin.Context, code int, msg string) {
 	c.JSON(http.StatusOK, R{Code: code, Msg: msg})
 }
 
+// FailStatus sends a business error response with an explicit HTTP status.
+func FailStatus(c *gin.Context, httpStatus, code int, msg string) {
+	c.JSON(httpStatus, R{Code: code, Msg: msg})
+}
+
 // Page sends a paginated success response.
 func Page(c *gin.Context, list any, total int64, page, size int) {
 	if page <= 0 {

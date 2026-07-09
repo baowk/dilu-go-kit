@@ -195,6 +195,61 @@ func TestMergeLayer_twoLayers(t *testing.T) {
 	}
 }
 
+func TestMergeConfigLayersRebuildsFromLocalBase(t *testing.T) {
+	base := &Config{
+		Server: ServerConfig{Name: "local", Addr: ":8080", Mode: "debug"},
+		Redis:  RedisConfig{Addr: "local-redis:6379"},
+	}
+
+	first, err := cloneConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeConfigLayers(first, "yaml",
+		[]byte("server:\n  name: remote\nredis:\n  addr: remote-redis:6379\n"),
+		[]byte("server:\n  addr: \":9090\"\n"),
+	); err != nil {
+		t.Fatalf("first merge: %v", err)
+	}
+	if first.Redis.Addr != "remote-redis:6379" {
+		t.Fatalf("first merge redis = %q", first.Redis.Addr)
+	}
+
+	second, err := cloneConfig(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeConfigLayers(second, "yaml",
+		[]byte("server:\n  name: remote2\n"),
+		[]byte("server:\n  addr: \":9091\"\n"),
+	); err != nil {
+		t.Fatalf("second merge: %v", err)
+	}
+
+	if second.Server.Name != "remote2" {
+		t.Fatalf("server.name = %q", second.Server.Name)
+	}
+	if second.Server.Addr != ":9091" {
+		t.Fatalf("server.addr = %q", second.Server.Addr)
+	}
+	if second.Redis.Addr != "local-redis:6379" {
+		t.Fatalf("redis addr should fall back to local base, got %q", second.Redis.Addr)
+	}
+}
+
+func TestMergeConfigLayersLocalOnlyFallback(t *testing.T) {
+	base := &Config{
+		Server: ServerConfig{Name: "local", Addr: ":8080"},
+		Redis:  RedisConfig{Addr: "local-redis:6379"},
+	}
+	if err := mergeConfigLayers(base, "yaml", nil, nil); err != nil {
+		t.Fatalf("merge local only: %v", err)
+	}
+	if base.Server.Name != "local" || base.Redis.Addr != "local-redis:6379" {
+		t.Fatalf("base changed unexpectedly: %+v", base)
+	}
+}
+
 // ── fetchRemoteByKey error paths ──
 
 func TestFetchRemoteByKey_unsupportedType(t *testing.T) {

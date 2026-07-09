@@ -15,3 +15,4 @@
 
 - 详细规范见 `docs/conventions.md`
 - 快速上手见 `docs/quickstart.md`
+- 数据层必须按表拆文件：一张表一个 `model/{table}.go`，一张表一个 `store/{table}_pg.go`；`store/store.go` 只放聚合和初始化，禁止把多个表集中到单个大文件。

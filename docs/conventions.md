@@ -5,12 +5,23 @@
 ```
 my-service/
   cmd/main.go                       <- 入口
-  internal/modules/{module}/
+  internal/{module}/
     model/                          <- 手写结构体（一张表一个文件）
+      task.go
+      task_comment.go
     store/                          <- Store 接口 + PG 实现 + Init/S()
-    service/                        <- 业务逻辑
-      dto/                          <- 请求/响应 DTO
-    apis/                           <- HTTP handler（调用 resp 包）
+      store.go                      <- 只放 Stores 聚合、Init、S
+      task_pg.go                    <- task 表 PG 实现
+      task_comment_pg.go            <- task_comment 表 PG 实现
+    service/                        <- 业务逻辑（一类资源一个文件）
+      task.go
+      task_comment.go
+      dto/                          <- 请求/响应 DTO（一类资源一个文件）
+        task.go
+        task_comment.go
+    apis/                           <- HTTP handler（一类资源一个文件，调用 resp 包）
+      task_api.go
+      task_comment_api.go
     grpc/                           <- gRPC handler（可选）
     router/                         <- 路由注册
   internal/common/                  <- 服务内公共代码
@@ -21,6 +32,26 @@ my-service/
 ```
 
 ## 二、数据访问层
+
+### 文件拆分硬约束
+
+AI 生成或补充代码时必须按“表/资源”为最小文件边界，避免把一个模块所有 model、store、service、dto、handler 都塞进单个大文件。
+
+**必须**：
+- 每张表一个 `model/{table}.go`，文件内只放该表的结构体、`TableName()` 和该表强相关的小常量/枚举。
+- 每张表一个 `store/{table}_pg.go`，文件内只放该表对应的 PG store 实现。
+- `store/store.go` 只放 Store 接口聚合、`Stores`、`Init(db)`、`S()`，不要放具体 SQL 实现。
+- 每类资源一个 `service/{resource}.go`，只放该资源业务逻辑。
+- 每类资源一个 `service/dto/{resource}.go`，只放该资源请求/响应 DTO。
+- 每类资源一个 `apis/{resource}_api.go`，只放该资源 HTTP handler。
+- 新增表/资源时新增整组文件，不扩写已有资源文件；例如新增 `task_comment` 时创建 `model/task_comment.go`、`store/task_comment_pg.go`、`service/task_comment.go`、`service/dto/task_comment.go`、`apis/task_comment_api.go`。
+
+**禁止**：
+- 禁止创建或扩写 `model/model.go` 来集中放多个表结构体。
+- 禁止创建或扩写 `store/pg.go`、`store/store_pg.go`、`store/repository.go` 来集中放多个表的查询实现。
+- 禁止创建或扩写 `service/service.go`、`service/dto/dto.go`、`apis/apis.go` 来集中放多个资源的业务逻辑、DTO 或 handler。
+- 禁止把多个表的 CRUD 混在一个 store struct 里；每张表一个 `XxxStore` 接口和一个 `pgXxxStore` 实现。
+- 单文件超过约 300 行时必须优先拆分到按表/按职责文件，而不是继续追加。
 
 ### Model
 
@@ -41,7 +72,7 @@ func (Task) TableName() string { return "task" }
 ```
 
 **规则**：
-- 一张表一个文件
+- 一张表一个文件，命名使用 snake_case 表名，如 `task.go`、`task_comment.go`
 - 字段类型与 DDL 严格对齐
 - `*time.Time` 可空字段，`time.Time` 非空字段
 - 必须有 `TableName()` 方法
@@ -63,6 +94,7 @@ type TaskStore interface {
 - 分区表查询必须带分区键（如 `workspace_id`）
 - 部分更新用 `map[string]any`
 - 返回 `(int64, error)` 的方法，int64 是 RowsAffected
+- 每个 Store 接口和 PG 实现只服务一张表；跨表事务放 service 层编排
 - 禁止 service 层直接使用 `gorm.DB`
 
 ### Store 初始化
@@ -143,11 +175,19 @@ r.Use(mid.ErrorHandler())   // AppError panic 捕获
 r.Use(mid.Logger())         // 请求日志（method/path/status/latency/traceId）
 r.Use(mid.CORS())           // CORS（支持 whitelist）
 r.Use(mid.RateLimit(100, time.Minute))
+limiter := mid.NewRateLimiter(100, time.Minute) // 需要显式生命周期时
+r.Use(limiter.Middleware())
+// app.OnClose(limiter.Close)
 
 // JWT 认证
 auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
-    Secret:    "your-secret",
-    HeaderUID: "a_uid",
+    Secret: jwtSecret,
+}))
+
+// 仅在可信网关已剥离外部身份头时开启 HeaderUID 信任模式
+r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
+    HeaderUID:      "a_uid",
+    TrustHeaderUID: true,
 }))
 
 // 获取用户信息
@@ -190,7 +230,8 @@ notify.SendContext(ctx, "proxy", payload)  // 携带 traceId
 ```yaml
 server:
   name: my-service
-  addr: ":8080"
+  addr: ":8080"                # 监听地址
+  # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug             # debug / release
 
 log:
@@ -204,7 +245,7 @@ log:
 
 database:
   main:
-    dsn: "host=127.0.0.1 user=postgres dbname=mydb sslmode=disable"
+    dsn: ""                 # 建议用 DATABASE_MAIN_DSN / DATABASE_DSN 注入
     maxIdle: 10           # 最大空闲连接数（默认 10）
     maxOpen: 50           # 最大打开连接数（默认 50）
     maxLifetime: 3600     # 连接最大存活时间，秒（默认 3600）
@@ -215,15 +256,16 @@ database:
 redis:
   addr: "127.0.0.1:6379"
   username: ""              # Redis 6+ ACL 用户名（可选）
-  password: ""
+  password: ""              # 建议用 REDIS_PASSWORD 注入
   db: 0
 
 grpc:
   enable: false
-  addr: ":9090"
+  addr: ":9090"              # 监听地址
+  # advertiseAddr: "10.0.1.5:9090" # 注册发现地址；空时从 addr 推断
 
 jwt:
-  secret: "your-secret"
+  secret: ""                # 建议用 JWT_SECRET 注入
   expires: 1440           # 过期时间，分钟
   refresh: 30             # 自动刷新窗口，分钟
 
@@ -247,7 +289,7 @@ registry:
   endpoints:                # etcd 端点
     - "127.0.0.1:2379"
   # address: "127.0.0.1:8500"  # consul 地址
-  # token: ""                   # consul ACL token
+  # token: ""                   # consul ACL token，建议用 REGISTRY_TOKEN 注入
   prefix: "/services/"
   ttl: 30
   configKey: "/config/"     # 有值即启用远程配置（自动拼 server.name）
@@ -275,13 +317,15 @@ type MyConfig struct {
 **注册格式**：
 ```
 key:   /{prefix}/{service_name}/{instance_id}
-value: {"name":"mf-user","instance_id":"mf-user-host-1234-56789","addr":":7801","grpc_addr":":7889"}
+value: {"name":"mf-user","instance_id":"mf-user-host-1234-56789","addr":"10.0.1.5:7801","grpc_addr":"10.0.1.5:7889"}
 lease: 30s TTL + keepalive
 ```
 
 **网关侧**：Watch 前缀，动态更新路由表，新服务上线/下线无需改配置。
 
 **本地开发**：`registry.enable: false` 即可关闭，使用静态地址。
+
+**注册地址**：`server.addr` / `grpc.addr` 是监听地址，`advertiseAddr` 是注册给其他服务连接的地址。多机或容器部署建议显式配置 `server.advertiseAddr` / `grpc.advertiseAddr`，也可用 `SERVER_ADVERTISE_ADDR` / `GRPC_ADVERTISE_ADDR` 注入。
 
 ## 七、远程配置
 
@@ -332,3 +376,30 @@ etcd/consul KV:
   /config/mf-order         → { database: ..., redis: ... }
   /config/mf-gateway       → { jwt: ..., cors: ... }
 ```
+
+### 多节点启动示例
+
+同一服务多实例不要复制多份 YAML，可用环境变量区分节点：
+
+```bash
+REMOTE_NODE=node-1 SERVER_ADDR=:7801 SERVER_ADVERTISE_ADDR=10.0.1.5:7801 ./mf-user
+REMOTE_NODE=node-2 SERVER_ADDR=:7802 SERVER_ADVERTISE_ADDR=10.0.1.6:7802 ./mf-user
+```
+
+`REMOTE_NODE=node-1` 会读取 `/config/mf-user/node-1`；`REMOTE_NODE=node-2` 会读取 `/config/mf-user/node-2`。节点级 key 删除后会回落到服务级/本地配置；服务级 key 删除后，热更新会回落到本地配置。
+
+## 八、敏感配置
+
+密码、token、JWT secret 不要提交到 YAML 或远程配置。环境变量覆盖优先级最高，启动合并和热更新后都会重新应用：
+
+| 环境变量 | 覆盖字段 |
+| --- | --- |
+| `DATABASE_DSN` | 所有 `database.*.dsn` |
+| `DATABASE_<NAME>_DSN` | 指定数据库，如 `DATABASE_MAIN_DSN` |
+| `REDIS_USERNAME` / `REDIS_PASSWORD` | `redis.username/password` |
+| `JWT_SECRET` | `jwt.secret` |
+| `REGISTRY_TOKEN` | `registry.token` |
+| `NOTIFY_WS_URL` | `notify.wsUrl` |
+| `SERVER_ADDR` / `SERVER_ADVERTISE_ADDR` | `server.addr/advertiseAddr` |
+| `GRPC_ADDR` / `GRPC_ADVERTISE_ADDR` | `grpc.addr/advertiseAddr` |
+| `REMOTE_NODE` | `registry.configNode` |

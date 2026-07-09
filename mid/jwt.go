@@ -1,12 +1,13 @@
 package mid
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
+	"github.com/baowk/dilu-go-kit/resp"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/baowk/dilu-go-kit/resp"
 )
 
 // JWTConfig configures the JWT middleware.
@@ -15,15 +16,21 @@ type JWTConfig struct {
 
 	// HeaderUID is an optional header name for pre-verified user ID
 	// (e.g. from an API gateway). If set and present, JWT parsing is skipped.
+	// TrustHeaderUID must also be true to enable this path.
 	HeaderUID string // default: "" (disabled)
+
+	// TrustHeaderUID explicitly enables HeaderUID trust mode. Only turn this on
+	// behind a trusted gateway that strips user-supplied identity headers.
+	TrustHeaderUID bool
 }
 
 // JWT returns a Gin middleware that verifies Bearer tokens.
 // On success it sets "uid" (int64) in the Gin context.
 func JWT(cfg JWTConfig) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Pre-verified by gateway
-		if cfg.HeaderUID != "" {
+		// Pre-verified by gateway. This is opt-in because identity headers are
+		// trivially spoofable on services that can be reached directly.
+		if cfg.HeaderUID != "" && cfg.TrustHeaderUID {
 			if uidStr := c.GetHeader(cfg.HeaderUID); uidStr != "" {
 				uid, _ := strconv.ParseInt(uidStr, 10, 64)
 				if uid > 0 {
@@ -46,7 +53,15 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 		}
 
 		tokenStr := strings.TrimPrefix(auth, "Bearer ")
+		if cfg.Secret == "" {
+			resp.Fail(c, 40103, "Token 无效")
+			c.Abort()
+			return
+		}
 		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, errors.New("unexpected signing method")
+			}
 			return []byte(cfg.Secret), nil
 		})
 		if err != nil || !token.Valid {
@@ -92,10 +107,6 @@ func GetUID(c *gin.Context) int64 {
 			return id
 		}
 	}
-	if s := c.GetHeader("a_uid"); s != "" {
-		id, _ := strconv.ParseInt(s, 10, 64)
-		return id
-	}
 	return 0
 }
 
@@ -106,17 +117,13 @@ func GetNickname(c *gin.Context) string {
 			return s
 		}
 	}
-	return c.GetHeader("a_nickname")
+	return ""
 }
 
 // GetRoleID extracts the role ID from the Gin context.
 func GetRoleID(c *gin.Context) int {
 	if v := c.GetInt("role_id"); v != 0 {
 		return v
-	}
-	if s := c.GetHeader("a_rid"); s != "" {
-		id, _ := strconv.Atoi(s)
-		return id
 	}
 	return 0
 }
@@ -128,5 +135,5 @@ func GetPhone(c *gin.Context) string {
 			return s
 		}
 	}
-	return c.GetHeader("a_mobile")
+	return ""
 }

@@ -33,6 +33,7 @@ type App struct {
 	Registry registry.Registry
 
 	cfgMu          sync.RWMutex // protects Config during hot-reload
+	localConfig    *Config      // local file/env config used as hot-reload merge base
 	instanceID     string
 	onStart        []func()
 	onClose        []func()
@@ -64,12 +65,17 @@ func New(cfgPath string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	localCfg, err := cloneConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	// Merge remote config from registry backend if configKey is set
 	if cfg.Registry.ConfigKey != "" && (len(cfg.Registry.Endpoints) > 0 || cfg.Registry.Address != "") {
 		if err := MergeRemoteConfig(cfg.Registry, cfg.Server.Name, cfg); err != nil {
 			return nil, fmt.Errorf("remote config: %w", err)
 		}
+		applyEnvOverrides(cfg)
 	}
 
 	log.Init(cfg.Server.Mode, cfg.Server.Name, cfg.Log.Output, &cfg.Log.File)
@@ -78,11 +84,15 @@ func New(cfgPath string) (*App, error) {
 		gin.SetMode(gin.ReleaseMode)
 	}
 	r := gin.New()
+	if err := r.SetTrustedProxies(nil); err != nil {
+		return nil, fmt.Errorf("gin trusted proxies: %w", err)
+	}
 
 	app := &App{
-		Config: cfg,
-		Gin:    r,
-		DBs:    make(map[string]*gorm.DB),
+		Config:      cfg,
+		localConfig: localCfg,
+		Gin:         r,
+		DBs:         make(map[string]*gorm.DB),
 	}
 
 	if len(cfg.Database) > 0 {
@@ -172,10 +182,10 @@ func (a *App) Run(setup SetupFunc) error {
 		svc := registry.Service{
 			Name:       a.Config.Server.Name,
 			InstanceID: a.instanceID,
-			Addr:       a.Config.Server.Addr,
+			Addr:       resolveAdvertiseAddr(a.Config.Server.Addr, a.Config.Server.AdvertiseAddr),
 		}
 		if a.Config.GRPC.Enable {
-			svc.GRPCAddr = a.Config.GRPC.Addr
+			svc.GRPCAddr = resolveAdvertiseAddr(a.Config.GRPC.Addr, a.Config.GRPC.AdvertiseAddr)
 		}
 		if err := a.Registry.Register(context.Background(), svc); err != nil {
 			log.Error("service registration failed", "error", err)
@@ -260,7 +270,6 @@ func (a *App) watchRemoteConfig(ctx context.Context) {
 	cfg := a.GetConfig()
 	reg := cfg.Registry
 	serviceName := cfg.Server.Name
-	format := reg.configFormat()
 
 	// Snapshot callbacks — OnConfigChange must be called before Run
 	a.cfgMu.RLock()
@@ -268,29 +277,74 @@ func (a *App) watchRemoteConfig(ctx context.Context) {
 	copy(callbacks, a.onConfigChange)
 	a.cfgMu.RUnlock()
 
-	log.Info("remote config: watching for changes", "key", reg.resolveConfigKey(serviceName))
+	log.Info("remote config: watching for changes",
+		"key", reg.resolveConfigKey(serviceName),
+		"node_key", reg.resolveConfigNodeKey(serviceName),
+	)
 
-	err := WatchRemoteConfig(ctx, reg, serviceName, func(data []byte) {
-		// Parse into a fresh Config, starting from current as base
-		current := a.GetConfig()
-		newCfg := *current
-		if err := unmarshalBytes(data, format, &newCfg); err != nil {
-			log.Error("remote config: failed to parse update", "error", err)
+	var reloadMu sync.Mutex
+	err := WatchRemoteConfigTree(ctx, reg, serviceName, func() {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+
+		base := a.localConfig
+		if base == nil {
+			base = a.GetConfig()
+		}
+		newCfg, err := cloneConfig(base)
+		if err != nil {
+			log.Error("remote config: failed to clone local base", "error", err)
 			return
 		}
+		if err := MergeRemoteConfigOptional(reg, serviceName, newCfg); err != nil {
+			log.Error("remote config: failed to merge update", "error", err)
+			return
+		}
+		applyEnvOverrides(newCfg)
 
 		// Run all OnConfigChange callbacks; any error rejects the update
 		for _, fn := range callbacks {
-			if err := fn(&newCfg); err != nil {
+			if err := fn(newCfg); err != nil {
 				log.Warn("remote config: update rejected by callback", "error", err)
 				return
 			}
 		}
 
-		a.swapConfig(&newCfg)
+		a.swapConfig(newCfg)
 		log.Info("remote config: config updated")
 	})
 	if err != nil && ctx.Err() == nil {
 		log.Error("remote config: watch stopped unexpectedly", "error", err)
 	}
+}
+
+func resolveAdvertiseAddr(listenAddr, advertiseAddr string) string {
+	if advertiseAddr != "" {
+		return advertiseAddr
+	}
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil || port == "" {
+		return listenAddr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		return net.JoinHostPort(localAdvertiseIP(), port)
+	}
+	return listenAddr
+}
+
+func localAdvertiseIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "127.0.0.1"
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		if ip := ipNet.IP.To4(); ip != nil {
+			return ip.String()
+		}
+	}
+	return "127.0.0.1"
 }

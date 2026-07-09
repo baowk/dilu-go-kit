@@ -1,0 +1,41 @@
+package mid
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+func TestRateLimiterReturns429Status(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	limiter := NewRateLimiter(1, time.Minute)
+	defer limiter.Close()
+
+	r := gin.New()
+	r.Use(limiter.Middleware())
+	r.GET("/x", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first status = %d", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d", w.Code)
+	}
+}
+
+func TestRateLimiterCloseIsIdempotent(t *testing.T) {
+	limiter := NewRateLimiter(1, time.Millisecond)
+	limiter.Close()
+	limiter.Close()
+}

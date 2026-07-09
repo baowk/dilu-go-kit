@@ -1,6 +1,8 @@
 package mid
 
 import (
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/baowk/dilu-go-kit/log"
@@ -12,10 +14,7 @@ import (
 func Logger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		path := c.Request.URL.Path
-		if c.Request.URL.RawQuery != "" {
-			path += "?" + c.Request.URL.RawQuery
-		}
+		path := logPath(c.Request.URL)
 
 		c.Next()
 
@@ -30,5 +29,31 @@ func Logger() gin.HandlerFunc {
 			"ip", c.ClientIP(),
 			"size", c.Writer.Size(),
 		)
+	}
+}
+
+func logPath(u *url.URL) string {
+	if u.RawQuery == "" {
+		return u.Path
+	}
+
+	q := u.Query()
+	for key := range q {
+		if isSensitiveQueryKey(key) {
+			q.Set(key, "[REDACTED]")
+		}
+	}
+	if encoded := q.Encode(); encoded != "" {
+		return u.Path + "?" + encoded
+	}
+	return u.Path
+}
+
+func isSensitiveQueryKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "token", "access_token", "refresh_token", "id_token", "authorization", "auth", "jwt":
+		return true
+	default:
+		return false
 	}
 }

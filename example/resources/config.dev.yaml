@@ -1,6 +1,7 @@
 server:
   name: demo-service
-  addr: ":8080"
+  addr: ":8080"                    # listen address
+  # advertiseAddr: "10.0.1.5:8080" # service discovery address; inferred from addr when empty
   mode: debug
 
 # log:
@@ -14,16 +15,23 @@ server:
 
 database:
   main:
-    dsn: "host=127.0.0.1 user=postgres dbname=demo sslmode=disable"
+    dsn: "host=127.0.0.1 user=postgres dbname=demo sslmode=disable" # use DATABASE_MAIN_DSN in shared configs
     maxIdle: 10
     maxOpen: 50
     maxLifetime: 3600
 
 redis:
   addr: "127.0.0.1:6379"
+  # password: "" # use REDIS_PASSWORD in shared configs
+
+jwt:
+  secret: "" # use JWT_SECRET in shared configs
+  expires: 1440
 
 grpc:
   enable: false
+  # addr: ":9090"
+  # advertiseAddr: "10.0.1.5:9090"
 
 registry:
   enable: true

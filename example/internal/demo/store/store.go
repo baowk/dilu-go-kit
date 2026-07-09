@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"github.com/baowk/dilu-go-kit/example/internal/modules/demo/model"
+	"github.com/baowk/dilu-go-kit/example/internal/demo/model"
 	base "github.com/baowk/dilu-go-kit/store"
 	"gorm.io/gorm"
 )
@@ -17,9 +17,18 @@ type TaskStore interface {
 	Delete(ctx context.Context, id int64) (int64, error)
 }
 
+// TaskCommentStore defines the data access interface for task comments.
+type TaskCommentStore interface {
+	GetByID(ctx context.Context, id int64) (*model.TaskComment, error)
+	ListByTaskID(ctx context.Context, taskID int64, opts base.ListOpts) ([]*model.TaskComment, int64, error)
+	Create(ctx context.Context, c *model.TaskComment) error
+	Delete(ctx context.Context, id int64) (int64, error)
+}
+
 // Stores holds all store instances.
 type Stores struct {
-	Task TaskStore
+	Task        TaskStore
+	TaskComment TaskCommentStore
 }
 
 var s *Stores
@@ -27,7 +36,8 @@ var s *Stores
 // Init creates all stores from a gorm.DB (call once at startup).
 func Init(db *gorm.DB) {
 	s = &Stores{
-		Task: &pgTaskStore{db: db},
+		Task:        &pgTaskStore{db: db},
+		TaskComment: &pgTaskCommentStore{db: db},
 	}
 }
 

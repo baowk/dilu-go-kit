@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -13,6 +14,9 @@ import (
 	"github.com/spf13/viper"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
+
+// ErrRemoteConfigNotFound indicates that a remote config key is missing.
+var ErrRemoteConfigNotFound = errors.New("remote config key not found")
 
 // ── key resolution helpers (on RegistryConfig) ──
 
@@ -77,6 +81,45 @@ func LoadRemoteConfig(reg RegistryConfig, serviceName string, cfg any) error {
 // onChange with new raw bytes. Blocks until ctx is cancelled.
 func WatchRemoteConfig(ctx context.Context, reg RegistryConfig, serviceName string, onChange func([]byte)) error {
 	key := reg.resolveConfigKey(serviceName)
+	return watchRemoteConfigKey(ctx, reg, key, onChange)
+}
+
+// WatchRemoteConfigTree watches the service-level key and optional node-level
+// key. It calls onChange when either key changes, so callers can rebuild the
+// full local → service → node merge.
+func WatchRemoteConfigTree(ctx context.Context, reg RegistryConfig, serviceName string, onChange func()) error {
+	keys := []string{reg.resolveConfigKey(serviceName)}
+	if nodeKey := reg.resolveConfigNodeKey(serviceName); nodeKey != "" {
+		keys = append(keys, nodeKey)
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, len(keys))
+	for _, key := range keys {
+		key := key
+		go func() {
+			errCh <- watchRemoteConfigKey(watchCtx, reg, key, func([]byte) {
+				onChange()
+			})
+		}()
+	}
+
+	for range keys {
+		select {
+		case err := <-errCh:
+			if err != nil && watchCtx.Err() == nil {
+				return err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
+}
+
+func watchRemoteConfigKey(ctx context.Context, reg RegistryConfig, key string, onChange func([]byte)) error {
 	switch reg.registryType() {
 	case "etcd":
 		return watchEtcd(ctx, reg, key, onChange)
@@ -92,8 +135,42 @@ func WatchRemoteConfig(ctx context.Context, reg RegistryConfig, serviceName stri
 //
 // Merge order: local → service shared → node-specific.
 func MergeRemoteConfig(reg RegistryConfig, serviceName string, base *Config) error {
+	return mergeRemoteConfig(reg, serviceName, base, false)
+}
+
+func MergeRemoteConfigOptional(reg RegistryConfig, serviceName string, base *Config) error {
+	return mergeRemoteConfig(reg, serviceName, base, true)
+}
+
+func mergeRemoteConfig(reg RegistryConfig, serviceName string, base *Config, allowMissingService bool) error {
 	svcKey := reg.resolveConfigKey(serviceName)
 
+	// Layer 1: service shared config
+	svcData, err := fetchRemoteByKey(reg, svcKey)
+	if err != nil {
+		if !allowMissingService || !errors.Is(err, ErrRemoteConfigNotFound) {
+			return err
+		}
+		log.Info("remote config: service config missing, using local base", "key", svcKey)
+	} else {
+		log.Info("remote config: service config loaded", "key", svcKey)
+	}
+
+	// Layer 2: node-specific config (optional, missing key is not an error)
+	var nodeData []byte
+	nodeKey := reg.resolveConfigNodeKey(serviceName)
+	if nodeKey != "" {
+		nodeData, err = fetchRemoteByKey(reg, nodeKey)
+		if err == nil {
+			log.Info("remote config: node override applied", "key", nodeKey)
+		}
+		// missing node key is fine — just skip
+	}
+
+	return mergeConfigLayers(base, reg.configFormat(), svcData, nodeData)
+}
+
+func mergeConfigLayers(base *Config, format string, serviceData, nodeData []byte) error {
 	// Load local base into viper via JSON round-trip
 	merged := viper.New()
 	merged.SetConfigType("json")
@@ -102,29 +179,16 @@ func MergeRemoteConfig(reg RegistryConfig, serviceName string, base *Config) err
 		return fmt.Errorf("remote config: encode local: %w", err)
 	}
 
-	// Layer 1: service shared config
-	svcData, err := fetchRemoteByKey(reg, svcKey)
-	if err != nil {
-		return err
-	}
-	if err := mergeLayer(merged, svcData, reg.configFormat()); err != nil {
-		return fmt.Errorf("remote config: merge service: %w", err)
-	}
-	log.Info("remote config: service config loaded", "key", svcKey)
-
-	// Layer 2: node-specific config (optional, missing key is not an error)
-	nodeKey := reg.resolveConfigNodeKey(serviceName)
-	if nodeKey != "" {
-		nodeData, err := fetchRemoteByKey(reg, nodeKey)
-		if err == nil {
-			if err := mergeLayer(merged, nodeData, reg.configFormat()); err != nil {
-				return fmt.Errorf("remote config: merge node: %w", err)
-			}
-			log.Info("remote config: node override applied", "key", nodeKey)
+	if len(serviceData) > 0 {
+		if err := mergeLayer(merged, serviceData, format); err != nil {
+			return fmt.Errorf("remote config: merge service: %w", err)
 		}
-		// missing node key is fine — just skip
 	}
-
+	if len(nodeData) > 0 {
+		if err := mergeLayer(merged, nodeData, format); err != nil {
+			return fmt.Errorf("remote config: merge node: %w", err)
+		}
+	}
 	if err := merged.Unmarshal(base); err != nil {
 		return fmt.Errorf("remote config: unmarshal merged: %w", err)
 	}
@@ -171,7 +235,7 @@ func fetchEtcd(reg RegistryConfig, key string) ([]byte, error) {
 		return nil, fmt.Errorf("remote config: etcd get %q: %w", key, err)
 	}
 	if len(resp.Kvs) == 0 {
-		return nil, fmt.Errorf("remote config: etcd key %q not found", key)
+		return nil, fmt.Errorf("%w: etcd key %q", ErrRemoteConfigNotFound, key)
 	}
 	return resp.Kvs[0].Value, nil
 }
@@ -188,6 +252,8 @@ func watchEtcd(ctx context.Context, reg RegistryConfig, key string, onChange fun
 		for _, ev := range resp.Events {
 			if ev.Kv != nil && ev.Kv.Value != nil {
 				onChange(ev.Kv.Value)
+			} else if ev.Type == clientv3.EventTypeDelete {
+				onChange(nil)
 			}
 		}
 	}
@@ -222,7 +288,7 @@ func fetchConsul(reg RegistryConfig, key string) ([]byte, error) {
 		return nil, fmt.Errorf("remote config: consul get %q: %w", key, err)
 	}
 	if pair == nil {
-		return nil, fmt.Errorf("remote config: consul key %q not found", key)
+		return nil, fmt.Errorf("%w: consul key %q", ErrRemoteConfigNotFound, key)
 	}
 	return pair.Value, nil
 }
@@ -250,9 +316,13 @@ func watchConsul(ctx context.Context, reg RegistryConfig, key string, onChange f
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		if pair != nil && meta.LastIndex != lastIndex {
+		if meta != nil && meta.LastIndex != lastIndex {
 			lastIndex = meta.LastIndex
-			onChange(pair.Value)
+			if pair != nil {
+				onChange(pair.Value)
+			} else {
+				onChange(nil)
+			}
 		}
 	}
 }
