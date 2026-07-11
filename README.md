@@ -103,7 +103,7 @@ log:
 mid.Default(r, mid.DefaultConfig{...})
 
 // 方式二：单独使用
-r.Use(mid.Trace())         // traceId 生成/传递
+r.Use(mid.Trace())         // traceId 生成/传递，X-Request-Id 仅作兼容别名
 r.Use(mid.Recovery())      // panic 恢复
 r.Use(mid.ErrorHandler())  // AppError 捕获
 r.Use(mid.Logger())        // 请求日志（method/path/status/latency/traceId）

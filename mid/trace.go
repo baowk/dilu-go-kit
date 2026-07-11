@@ -6,13 +6,19 @@ import (
 	"github.com/google/uuid"
 )
 
-const TraceHeader = "X-Trace-Id"
+const (
+	TraceHeader   = "X-Trace-Id"
+	RequestHeader = "X-Request-Id"
+)
 
 // Trace returns a Gin middleware that extracts or generates a trace ID,
 // stores it in the context, and sets the response header.
 func Trace() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		traceID := c.GetHeader(TraceHeader)
+		if traceID == "" {
+			traceID = c.GetHeader(RequestHeader)
+		}
 		if traceID == "" {
 			traceID = uuid.NewString()
 		}
@@ -24,8 +30,9 @@ func Trace() gin.HandlerFunc {
 		ctx := log.WithTraceID(c.Request.Context(), traceID)
 		c.Request = c.Request.WithContext(ctx)
 
-		// Response header
+		// Response headers. X-Request-Id is a compatibility alias for trace_id.
 		c.Header(TraceHeader, traceID)
+		c.Header(RequestHeader, traceID)
 
 		c.Next()
 	}

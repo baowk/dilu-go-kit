@@ -198,7 +198,7 @@ mid.Default(a.Gin, mid.DefaultConfig{
 // 注册顺序：Trace → Recovery → ErrorHandler → Logger → CORS → RateLimit
 
 // 方式二：单独使用
-r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id header）
+r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id；X-Request-Id 仅作兼容别名）
 r.Use(mid.Recovery())       // panic 恢复
 r.Use(mid.ErrorHandler())   // AppError panic 捕获
 r.Use(mid.Logger())         // 请求日志（method/path/status/latency/traceId）
@@ -292,7 +292,7 @@ import "github.com/baowk/dilu-go-kit/notify"
 
 notify.Init("http://mf-ws:9020")
 notify.Send("env", map[string]any{"action": "created", "env_id": 123})
-notify.SendContext(ctx, "proxy", payload)  // 携带 traceId
+notify.SendContext(ctx, "proxy", payload)  // 携带 traceId，兼容写入 X-Request-Id 同值别名
 ```
 
 ### Redis Stream

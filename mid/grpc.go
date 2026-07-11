@@ -8,7 +8,10 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-const grpcTraceKey = "x-trace-id"
+const (
+	grpcTraceKey   = "x-trace-id"
+	grpcRequestKey = "x-request-id"
+)
 
 // GRPCUnaryClientInterceptor injects trace_id from context into gRPC metadata
 // for outgoing unary calls. Use when dialing another service.
@@ -17,7 +20,7 @@ const grpcTraceKey = "x-trace-id"
 func GRPCUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		if traceID := log.GetTraceID(ctx); traceID != "" {
-			ctx = metadata.AppendToOutgoingContext(ctx, grpcTraceKey, traceID)
+			ctx = metadata.AppendToOutgoingContext(ctx, grpcTraceKey, traceID, grpcRequestKey, traceID)
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
@@ -27,7 +30,7 @@ func GRPCUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 func GRPCStreamClientInterceptor() grpc.StreamClientInterceptor {
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
 		if traceID := log.GetTraceID(ctx); traceID != "" {
-			ctx = metadata.AppendToOutgoingContext(ctx, grpcTraceKey, traceID)
+			ctx = metadata.AppendToOutgoingContext(ctx, grpcTraceKey, traceID, grpcRequestKey, traceID)
 		}
 		return streamer(ctx, desc, cc, method, opts...)
 	}
@@ -59,6 +62,9 @@ func extractTraceFromMetadata(ctx context.Context) context.Context {
 		return ctx
 	}
 	vals := md.Get(grpcTraceKey)
+	if len(vals) == 0 || vals[0] == "" {
+		vals = md.Get(grpcRequestKey)
+	}
 	if len(vals) > 0 && vals[0] != "" {
 		ctx = log.WithTraceID(ctx, vals[0])
 	}

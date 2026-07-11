@@ -8,7 +8,10 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-const grpcTraceKey = "x-trace-id"
+const (
+	grpcTraceKey   = "x-trace-id"
+	grpcRequestKey = "x-request-id"
+)
 
 // grpcUnaryServerTrace extracts trace_id from gRPC metadata into context.
 func grpcUnaryServerTrace() grpc.UnaryServerInterceptor {
@@ -32,6 +35,9 @@ func extractTrace(ctx context.Context) context.Context {
 		return ctx
 	}
 	vals := md.Get(grpcTraceKey)
+	if len(vals) == 0 || vals[0] == "" {
+		vals = md.Get(grpcRequestKey)
+	}
 	if len(vals) > 0 && vals[0] != "" {
 		ctx = log.WithTraceID(ctx, vals[0])
 	}
