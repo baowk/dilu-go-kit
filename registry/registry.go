@@ -25,14 +25,17 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Service describes a registered service instance.
 type Service struct {
-	Name       string            `json:"name"`        // e.g. "mf-user"
-	InstanceID string            `json:"instance_id"`  // unique per instance
-	Addr       string            `json:"addr"`         // HTTP address, e.g. "10.0.1.5:7801"
+	Name       string            `json:"name"`                // e.g. "mf-user"
+	InstanceID string            `json:"instance_id"`         // unique per instance
+	Addr       string            `json:"addr"`                // HTTP address, e.g. "10.0.1.5:7801"
 	GRPCAddr   string            `json:"grpc_addr,omitempty"` // gRPC address, e.g. "10.0.1.5:7889"
 	Meta       map[string]string `json:"meta,omitempty"`      // version, weight, etc.
 	RegisterAt time.Time         `json:"register_at"`
@@ -79,8 +82,8 @@ type Config struct {
 	Address     string   `mapstructure:"address"`     // consul address, e.g. "127.0.0.1:8500"
 	Token       string   `mapstructure:"token"`       // consul ACL token (optional)
 	Prefix      string   `mapstructure:"prefix"`      // key prefix, default "/mofang/services/"
-	TTL         int      `mapstructure:"ttl"`          // lease/check TTL in seconds, default 30
-	DialTimeout int      `mapstructure:"dialTimeout"`  // dial timeout in seconds, default 5
+	TTL         int      `mapstructure:"ttl"`         // lease/check TTL in seconds, default 30
+	DialTimeout int      `mapstructure:"dialTimeout"` // dial timeout in seconds, default 5
 }
 
 func (c *Config) registryType() string {
@@ -104,7 +107,7 @@ func New(cfg Config) (Registry, error) {
 
 func (c *Config) prefix() string {
 	if c.Prefix != "" {
-		return c.Prefix
+		return strings.TrimRight(c.Prefix, "/") + "/"
 	}
 	return "/mofang/services/"
 }
@@ -163,5 +166,22 @@ func localIP() string {
 // GenerateInstanceID creates a unique instance ID from hostname + pid + timestamp.
 func GenerateInstanceID(name string) string {
 	host, _ := os.Hostname()
-	return fmt.Sprintf("%s-%s-%d-%d", name, host, os.Getpid(), time.Now().UnixMilli()%100000)
+	return fmt.Sprintf("%s-%s-%s", name, host, uuid.NewString())
+}
+
+func validateService(svc Service) error {
+	if svc.Name == "" || strings.Contains(svc.Name, "/") {
+		return fmt.Errorf("registry: invalid service name %q", svc.Name)
+	}
+	if svc.InstanceID == "" || strings.Contains(svc.InstanceID, "/") {
+		return fmt.Errorf("registry: invalid instance ID %q", svc.InstanceID)
+	}
+	_, port, err := net.SplitHostPort(svc.Addr)
+	if err != nil {
+		return fmt.Errorf("registry: parse addr %q: %w", svc.Addr, err)
+	}
+	if port == "" {
+		return fmt.Errorf("registry: address %q has no port", svc.Addr)
+	}
+	return nil
 }

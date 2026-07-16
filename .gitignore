@@ -1,0 +1,15 @@
+.DS_Store
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+bin/
+dist/
+coverage.out
+coverage.html
+*.test
+*.prof
+*.log
+logs/
+tmp/

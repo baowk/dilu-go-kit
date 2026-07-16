@@ -1,7 +1,10 @@
 package mid
 
 import (
+	"encoding/json"
 	"errors"
+	"math"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -12,7 +15,10 @@ import (
 
 // JWTConfig configures the JWT middleware.
 type JWTConfig struct {
-	Secret string // HMAC signing key
+	Secret   string // HMAC signing key
+	Issuer   string
+	Subject  string
+	Audience []string
 
 	// HeaderUID is an optional header name for pre-verified user ID
 	// (e.g. from an API gateway). If set and present, JWT parsing is skipped.
@@ -22,9 +28,10 @@ type JWTConfig struct {
 	// HeaderTenantID/HeaderShopIDs/HeaderScopes are optional identity context
 	// headers from a trusted gateway. They are only parsed when TrustHeaderUID
 	// is true and HeaderUID is valid.
-	HeaderTenantID string // e.g. "x-tenant-id"
-	HeaderShopIDs  string // comma-separated shop IDs, e.g. "1,2,3"
-	HeaderScopes   string // comma-separated scopes, e.g. "order.read,order.write"
+	HeaderTenantID    string // e.g. "x-tenant-id"
+	HeaderWorkspaceID string // e.g. "x-workspace-id"
+	HeaderShopIDs     string // comma-separated shop IDs, e.g. "1,2,3"
+	HeaderScopes      string // comma-separated scopes, e.g. "order.read,order.write"
 
 	// TrustHeaderUID explicitly enables HeaderUID trust mode. Only turn this on
 	// behind a trusted gateway that strips user-supplied identity headers.
@@ -51,50 +58,65 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 
 		// Parse Bearer token
 		auth := c.GetHeader("Authorization")
-		if auth == "" {
-			auth = "Bearer " + c.Query("token") // fallback for WebSocket
+		if auth == "" && strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+			auth = "Bearer " + c.Query("token")
 		}
-		if !strings.HasPrefix(auth, "Bearer ") {
-			resp.Fail(c, 40101, "未登录")
+		parts := strings.Fields(auth)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 			c.Abort()
 			return
 		}
 
-		tokenStr := strings.TrimPrefix(auth, "Bearer ")
+		tokenStr := parts[1]
 		if cfg.Secret == "" {
-			resp.Fail(c, 40103, "Token 无效")
+			resp.FailStatus(c, http.StatusUnauthorized, resp.CodeTokenInvalid, "Token 无效")
 			c.Abort()
 			return
 		}
+		parseOpts := []jwt.ParserOption{
+			jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+			jwt.WithExpirationRequired(),
+			jwt.WithJSONNumber(),
+		}
+		if cfg.Issuer != "" {
+			parseOpts = append(parseOpts, jwt.WithIssuer(cfg.Issuer))
+		}
+		if cfg.Subject != "" {
+			parseOpts = append(parseOpts, jwt.WithSubject(cfg.Subject))
+		}
+		if len(cfg.Audience) > 0 {
+			parseOpts = append(parseOpts, jwt.WithAudience(cfg.Audience...))
+		}
 		token, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			if t.Method != jwt.SigningMethodHS256 {
 				return nil, errors.New("unexpected signing method")
 			}
 			return []byte(cfg.Secret), nil
-		})
+		}, parseOpts...)
 		if err != nil || !token.Valid {
-			resp.Fail(c, 40103, "Token 无效")
+			resp.FailStatus(c, http.StatusUnauthorized, resp.CodeTokenInvalid, "Token 无效")
 			c.Abort()
 			return
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			resp.Fail(c, 40103, "Token 无效")
+			resp.FailStatus(c, http.StatusUnauthorized, resp.CodeTokenInvalid, "Token 无效")
 			c.Abort()
 			return
 		}
 
-		if uid, ok := claims["uid"].(float64); ok && uid > 0 {
-			c.Set("uid", int64(uid))
+		if uid := claimInt64(claims, "uid"); uid > 0 {
+			c.Set("uid", uid)
 		} else {
-			resp.Fail(c, 40103, "Token 无效")
+			resp.FailStatus(c, http.StatusUnauthorized, resp.CodeTokenInvalid, "Token 无效")
 			c.Abort()
 			return
 		}
 
 		// Extract optional claims
-		if rid, ok := claims["rid"].(float64); ok {
+		if rid := claimInt64(claims, "rid"); rid > 0 && uint64(rid) <= uint64(^uint(0)>>1) {
 			c.Set("role_id", int(rid))
 		}
 		if nick, ok := claims["nick"].(string); ok {
@@ -115,6 +137,11 @@ func setTrustedHeaderContext(c *gin.Context, cfg JWTConfig) {
 			c.Set("tenant_id", tenantID)
 		}
 	}
+	if cfg.HeaderWorkspaceID != "" {
+		if workspaceID, _ := strconv.ParseInt(c.GetHeader(cfg.HeaderWorkspaceID), 10, 64); workspaceID > 0 {
+			c.Set("workspace_id", workspaceID)
+		}
+	}
 	if cfg.HeaderShopIDs != "" {
 		if shopIDs := parseInt64CSV(c.GetHeader(cfg.HeaderShopIDs)); len(shopIDs) > 0 {
 			c.Set("shop_ids", shopIDs)
@@ -131,6 +158,9 @@ func setOptionalClaimContext(c *gin.Context, claims jwt.MapClaims) {
 	if tenantID := claimInt64(claims, "tenant_id", "tid"); tenantID > 0 {
 		c.Set("tenant_id", tenantID)
 	}
+	if workspaceID := claimInt64(claims, "workspace_id", "wid"); workspaceID > 0 {
+		c.Set("workspace_id", workspaceID)
+	}
 	if shopIDs := claimInt64Slice(claims, "shop_ids", "sids"); len(shopIDs) > 0 {
 		c.Set("shop_ids", shopIDs)
 	}
@@ -143,7 +173,12 @@ func claimInt64(claims jwt.MapClaims, keys ...string) int64 {
 	for _, key := range keys {
 		switch v := claims[key].(type) {
 		case float64:
-			return int64(v)
+			if v > 0 && v <= math.MaxInt64 && math.Trunc(v) == v {
+				return int64(v)
+			}
+		case json.Number:
+			n, _ := v.Int64()
+			return n
 		case int64:
 			return v
 		case int:
@@ -151,6 +186,16 @@ func claimInt64(claims jwt.MapClaims, keys ...string) int64 {
 		case string:
 			n, _ := strconv.ParseInt(v, 10, 64)
 			return n
+		}
+	}
+	return 0
+}
+
+// GetWorkspaceID extracts the authenticated workspace ID from the Gin context.
+func GetWorkspaceID(c *gin.Context) int64 {
+	if v, ok := c.Get("workspace_id"); ok {
+		if id, ok := v.(int64); ok {
+			return id
 		}
 	}
 	return 0
@@ -164,8 +209,12 @@ func claimInt64Slice(claims jwt.MapClaims, keys ...string) []int64 {
 			for _, item := range v {
 				switch n := item.(type) {
 				case float64:
-					if n > 0 {
+					if n > 0 && n <= math.MaxInt64 && math.Trunc(n) == n {
 						out = append(out, int64(n))
+					}
+				case json.Number:
+					if parsed, err := n.Int64(); err == nil && parsed > 0 {
+						out = append(out, parsed)
 					}
 				case string:
 					if parsed, _ := strconv.ParseInt(n, 10, 64); parsed > 0 {

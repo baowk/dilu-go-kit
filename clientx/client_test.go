@@ -88,3 +88,35 @@ func TestMapGRPCError(t *testing.T) {
 		t.Fatalf("code = %d", CodeOf(err))
 	}
 }
+
+func TestBreakerAllowsSingleHalfOpenProbe(t *testing.T) {
+	now := time.Unix(100, 0)
+	b := NewBreaker(BreakerConfig{FailureThreshold: 1, Cooldown: time.Second, Now: func() time.Time { return now }})
+	_ = b.Do(context.Background(), func(context.Context) error { return errors.New("fail") })
+	now = now.Add(time.Second)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- b.Do(context.Background(), func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+	if err := b.Do(context.Background(), func(context.Context) error { return nil }); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("second half-open probe = %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDoRejectsNilOperation(t *testing.T) {
+	if err := Do(context.Background(), RetryConfig{}, nil); !errors.Is(err, ErrNilOperation) {
+		t.Fatalf("error = %v", err)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unicode"
 
@@ -39,11 +40,12 @@ type LogConfig struct {
 
 // JWTConfig describes JWT authentication settings.
 type JWTConfig struct {
-	Secret  string `mapstructure:"secret"`
-	Expires int    `mapstructure:"expires"` // minutes
-	Refresh int    `mapstructure:"refresh"` // minutes, auto-refresh window
-	Issuer  string `mapstructure:"issuer"`
-	Subject string `mapstructure:"subject"`
+	Secret   string   `mapstructure:"secret"`
+	Expires  int      `mapstructure:"expires"` // minutes
+	Refresh  int      `mapstructure:"refresh"` // minutes, auto-refresh window
+	Issuer   string   `mapstructure:"issuer"`
+	Subject  string   `mapstructure:"subject"`
+	Audience []string `mapstructure:"audience"`
 }
 
 // CORSConfig describes CORS settings.
@@ -55,14 +57,17 @@ type CORSConfig struct {
 
 // AccessLimitConfig describes rate limiting.
 type AccessLimitConfig struct {
-	Enable   bool `mapstructure:"enable"`
-	Total    int  `mapstructure:"total"`    // max requests per window (default 300)
-	Duration int  `mapstructure:"duration"` // window in seconds (default 5)
+	Enable    bool   `mapstructure:"enable"`
+	Total     int    `mapstructure:"total"`    // max requests per window (default 300)
+	Duration  int    `mapstructure:"duration"` // window in seconds (default 5)
+	Backend   string `mapstructure:"backend"`  // "memory" (default) or "redis"
+	KeyPrefix string `mapstructure:"keyPrefix"`
 }
 
 // NotifyConfig describes the WebSocket notification target.
 type NotifyConfig struct {
 	WsURL string `mapstructure:"wsUrl"` // mf-ws internal API base URL
+	Token string `mapstructure:"token"`
 }
 
 // RegistryConfig describes the service registry (etcd or consul).
@@ -75,6 +80,7 @@ type RegistryConfig struct {
 	Token        string   `mapstructure:"token"`        // consul ACL token (optional)
 	Prefix       string   `mapstructure:"prefix"`       // service discovery prefix, default "/mofang/services/"
 	TTL          int      `mapstructure:"ttl"`          // lease/check TTL in seconds, default 30
+	DialTimeout  int      `mapstructure:"dialTimeout"`  // seconds, default 5
 	ConfigKey    string   `mapstructure:"configKey"`    // remote config key prefix, e.g. "/config/" → auto appends server.name
 	ConfigNode   string   `mapstructure:"configNode"`   // node ID for per-instance override (optional, or env REMOTE_NODE)
 	ConfigFormat string   `mapstructure:"configFormat"` // "yaml" (default) or "json"
@@ -82,10 +88,17 @@ type RegistryConfig struct {
 
 // ServerConfig describes the HTTP server.
 type ServerConfig struct {
-	Name          string `mapstructure:"name"`
-	Addr          string `mapstructure:"addr"`          // listen addr, e.g. ":7801"
-	AdvertiseAddr string `mapstructure:"advertiseAddr"` // service discovery addr, e.g. "10.0.1.5:7801"
-	Mode          string `mapstructure:"mode"`          // "debug" or "release"
+	Name              string   `mapstructure:"name"`
+	Addr              string   `mapstructure:"addr"`              // listen addr, e.g. ":7801"
+	AdvertiseAddr     string   `mapstructure:"advertiseAddr"`     // service discovery addr, e.g. "10.0.1.5:7801"
+	Mode              string   `mapstructure:"mode"`              // "debug" or "release"
+	ReadHeaderTimeout int      `mapstructure:"readHeaderTimeout"` // seconds, default 5
+	ReadTimeout       int      `mapstructure:"readTimeout"`       // seconds, default 15
+	WriteTimeout      int      `mapstructure:"writeTimeout"`      // seconds, default 30
+	IdleTimeout       int      `mapstructure:"idleTimeout"`       // seconds, default 60
+	ShutdownTimeout   int      `mapstructure:"shutdownTimeout"`   // seconds, default 10
+	MaxHeaderBytes    int      `mapstructure:"maxHeaderBytes"`    // default 1 MiB
+	TrustedProxies    []string `mapstructure:"trustedProxies"`    // explicit reverse-proxy CIDRs
 }
 
 // DatabaseConfig describes a single database connection.
@@ -96,7 +109,8 @@ type DatabaseConfig struct {
 	MaxLifetime   int    `mapstructure:"maxLifetime"`   // max connection lifetime in seconds (default 3600)
 	MaxIdleTime   int    `mapstructure:"maxIdleTime"`   // max idle time in seconds (default 300)
 	SlowThreshold int    `mapstructure:"slowThreshold"` // slow query threshold in ms (default 200)
-	PingOnOpen    bool   `mapstructure:"pingOnOpen"`    // ping DB on open to verify connectivity (default true)
+	PingOnOpen    *bool  `mapstructure:"pingOnOpen"`    // nil defaults to true
+	PrepareStmt   *bool  `mapstructure:"prepareStmt"`   // nil defaults to true
 }
 
 // RedisConfig describes a Redis connection. Leave Addr empty to disable.
@@ -109,13 +123,17 @@ type RedisConfig struct {
 
 // GRPCConfig describes an optional gRPC listener.
 type GRPCConfig struct {
-	Enable        bool   `mapstructure:"enable"`
-	Addr          string `mapstructure:"addr"`          // listen addr, e.g. ":7889"
-	AdvertiseAddr string `mapstructure:"advertiseAddr"` // service discovery addr, e.g. "10.0.1.5:7889"
+	Enable          bool   `mapstructure:"enable"`
+	Addr            string `mapstructure:"addr"`            // listen addr, e.g. ":7889"
+	AdvertiseAddr   string `mapstructure:"advertiseAddr"`   // service discovery addr, e.g. "10.0.1.5:7889"
+	ShutdownTimeout int    `mapstructure:"shutdownTimeout"` // seconds, default 10
+	MaxRecvMsgSize  int    `mapstructure:"maxRecvMsgSize"`  // bytes, default 4 MiB
+	MaxSendMsgSize  int    `mapstructure:"maxSendMsgSize"`  // bytes, default 4 MiB
 }
 
 // LoadConfig reads a YAML config file into cfg.
-// Environment variables DATABASE_DSN and REDIS_ADDR override file values.
+// Environment variables override matching base Config fields, including when
+// Config is embedded in a service-specific struct.
 func LoadConfig(path string, cfg any) error {
 	v := viper.New()
 	v.SetConfigFile(path)
@@ -128,6 +146,12 @@ func LoadConfig(path string, cfg any) error {
 	}
 	if err := v.Unmarshal(cfg); err != nil {
 		return fmt.Errorf("unmarshal config: %w", err)
+	}
+	if base := embeddedBaseConfig(cfg); base != nil {
+		if err := base.validateInlineSecrets(); err != nil {
+			return err
+		}
+		applyEnvOverrides(base)
 	}
 	return nil
 }
@@ -147,8 +171,26 @@ func LoadBaseConfig(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+	if err := cfg.validateInlineSecrets(); err != nil {
+		return nil, err
+	}
 	applyEnvOverrides(&cfg)
 	return &cfg, nil
+}
+
+func (c *Config) validateInlineSecrets() error {
+	if c.Server.Mode != "release" && c.Server.Mode != "production" {
+		return nil
+	}
+	for name, db := range c.Database {
+		if db.DSN != "" {
+			return fmt.Errorf("database.%s.dsn must use an environment variable in release mode", name)
+		}
+	}
+	if c.Redis.Password != "" || c.JWT.Secret != "" || c.Registry.Token != "" || c.Notify.Token != "" {
+		return fmt.Errorf("passwords, JWT secrets, and tokens must use environment variables in release mode")
+	}
+	return nil
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -203,6 +245,62 @@ func applyEnvOverrides(cfg *Config) {
 	if wsURL := os.Getenv("NOTIFY_WS_URL"); wsURL != "" {
 		cfg.Notify.WsURL = wsURL
 	}
+	if token := os.Getenv("NOTIFY_TOKEN"); token != "" {
+		cfg.Notify.Token = token
+	}
+}
+
+func embeddedBaseConfig(cfg any) *Config {
+	if cfg == nil {
+		return nil
+	}
+	if base, ok := cfg.(*Config); ok {
+		return base
+	}
+	rv := reflect.ValueOf(cfg)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return nil
+	}
+	rv = rv.Elem()
+	if rv.Kind() != reflect.Struct {
+		return nil
+	}
+	configType := reflect.TypeOf(Config{})
+	for i := 0; i < rv.NumField(); i++ {
+		field := rv.Field(i)
+		if field.Type() == configType && field.CanAddr() && field.Addr().CanInterface() {
+			return field.Addr().Interface().(*Config)
+		}
+		if field.Type() == reflect.PointerTo(configType) && !field.IsNil() && field.CanInterface() {
+			return field.Interface().(*Config)
+		}
+	}
+	return nil
+}
+
+// Validate checks startup-critical configuration before resources are opened.
+func (c *Config) Validate() error {
+	if c == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if strings.TrimSpace(c.Server.Name) == "" {
+		return fmt.Errorf("server.name is required")
+	}
+	if strings.TrimSpace(c.Server.Addr) == "" {
+		return fmt.Errorf("server.addr is required")
+	}
+	for name, db := range c.Database {
+		if strings.TrimSpace(db.DSN) == "" {
+			return fmt.Errorf("database.%s.dsn is required", name)
+		}
+	}
+	if c.GRPC.Enable && strings.TrimSpace(c.GRPC.Addr) == "" {
+		return fmt.Errorf("grpc.addr is required when grpc is enabled")
+	}
+	if c.Registry.Enable && len(c.Registry.Endpoints) == 0 && c.Registry.Address == "" {
+		return fmt.Errorf("registry endpoint is required when registry is enabled")
+	}
+	return nil
 }
 
 func envName(name string) string {

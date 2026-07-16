@@ -36,7 +36,7 @@ func OpenDB(cfg DatabaseConfig, mode string) (*gorm.DB, error) {
 		),
 		SkipDefaultTransaction: true,
 		// PrepareStmt caches prepared statements for ~10-15% throughput improvement
-		PrepareStmt: true,
+		PrepareStmt: cfg.PrepareStmt == nil || *cfg.PrepareStmt,
 	}
 
 	db, err := gorm.Open(postgres.Open(cfg.DSN), gormCfg)
@@ -75,15 +75,12 @@ func OpenDB(cfg DatabaseConfig, mode string) (*gorm.DB, error) {
 
 	// ── Health check on startup ──
 
-	pingOnOpen := true // default: always ping on open
-	// Only skip if PingOnOpen is explicitly set and there's a custom SlowThreshold (indicating intentional config)
-	if cfg.SlowThreshold > 0 && !cfg.PingOnOpen {
-		pingOnOpen = cfg.PingOnOpen
-	}
+	pingOnOpen := cfg.PingOnOpen == nil || *cfg.PingOnOpen
 	if pingOnOpen {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := sqlDB.PingContext(ctx); err != nil {
+			_ = sqlDB.Close()
 			return nil, fmt.Errorf("db ping: %w", err)
 		}
 	}

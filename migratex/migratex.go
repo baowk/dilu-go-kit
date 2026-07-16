@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -129,7 +131,11 @@ func SourceURL(dir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("migratex: abs dir: %w", err)
 	}
-	return "file://" + filepath.ToSlash(abs), nil
+	path := filepath.ToSlash(abs)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return (&url.URL{Scheme: "file", Path: path}).String(), nil
 }
 
 var migrationNameRe = regexp.MustCompile(`[^a-zA-Z0-9_]+`)
@@ -146,16 +152,32 @@ func Create(dir, name string) (upPath, downPath string, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", fmt.Errorf("migratex: mkdir: %w", err)
 	}
-	version := time.Now().UTC().Format("20060102150405")
+	version := nextMigrationVersion()
 	upPath = filepath.Join(dir, version+"_"+slug+".up.sql")
 	downPath = filepath.Join(dir, version+"_"+slug+".down.sql")
 	if err := writeNewFile(upPath); err != nil {
 		return "", "", err
 	}
 	if err := writeNewFile(downPath); err != nil {
+		_ = os.Remove(upPath)
 		return "", "", err
 	}
 	return upPath, downPath, nil
+}
+
+var lastMigrationVersion atomic.Int64
+
+func nextMigrationVersion() string {
+	candidate := time.Now().UTC().UnixNano()
+	for {
+		previous := lastMigrationVersion.Load()
+		if candidate <= previous {
+			candidate = previous + 1
+		}
+		if lastMigrationVersion.CompareAndSwap(previous, candidate) {
+			return strconv.FormatInt(candidate, 10)
+		}
+	}
 }
 
 func slugName(name string) string {
@@ -175,7 +197,7 @@ func writeNewFile(path string) error {
 	return err
 }
 
-// EscapeDSN escapes a PostgreSQL DSN for safe shell display when needed.
+// EscapeDSN URL-encodes a PostgreSQL DSN. It is not shell escaping.
 func EscapeDSN(dsn string) string {
 	return url.QueryEscape(dsn)
 }

@@ -5,6 +5,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // --------------- Config defaults ---------------
@@ -36,6 +39,16 @@ func TestConfig_prefix(t *testing.T) {
 	c2 := Config{Prefix: "/custom/"}
 	if c2.prefix() != "/custom/" {
 		t.Errorf("custom prefix = %q", c2.prefix())
+	}
+	c3 := Config{Prefix: "/custom"}
+	if c3.prefix() != "/custom/" {
+		t.Errorf("normalized prefix = %q", c3.prefix())
+	}
+}
+
+func TestConsulRefreshIntervalNeverZero(t *testing.T) {
+	if got := consulRefreshInterval(1); got != time.Second {
+		t.Fatalf("interval = %s", got)
 	}
 }
 
@@ -128,6 +141,16 @@ func TestGenerateInstanceID(t *testing.T) {
 	id2 := GenerateInstanceID("mf-user")
 	if id == id2 {
 		t.Errorf("two generated IDs should differ: %q == %q", id, id2)
+	}
+}
+
+func TestEtcdDeleteEventIncludesInstanceID(t *testing.T) {
+	event, ok := etcdEvent("/svc/mf-user/", "mf-user", &clientv3.Event{
+		Type: clientv3.EventTypeDelete,
+		Kv:   &mvccpb.KeyValue{Key: []byte("/svc/mf-user/inst-1")},
+	})
+	if !ok || event.Service.InstanceID != "inst-1" {
+		t.Fatalf("event = %+v ok=%v", event, ok)
 	}
 }
 

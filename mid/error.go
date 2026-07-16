@@ -2,6 +2,8 @@ package mid
 
 import (
 	"fmt"
+	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"github.com/baowk/dilu-go-kit/log"
@@ -40,7 +42,7 @@ func ErrorHandler() gin.HandlerFunc {
 			if r := recover(); r != nil {
 				switch v := r.(type) {
 				case *AppError:
-					resp.Fail(c, v.Code, v.Msg)
+					resp.FailStatus(c, resp.HTTPStatusForCode(v.Code), v.Code, v.Msg)
 				case string:
 					// Legacy format: "CustomError#code#msg"
 					if strings.HasPrefix(v, "CustomError#") {
@@ -48,17 +50,17 @@ func ErrorHandler() gin.HandlerFunc {
 						if len(parts) == 3 {
 							code := 50000
 							fmt.Sscanf(parts[1], "%d", &code)
-							resp.Fail(c, code, parts[2])
+							resp.FailStatus(c, resp.HTTPStatusForCode(code), code, parts[2])
 						} else {
-							resp.Fail(c, 50000, v)
+							resp.FailStatus(c, http.StatusInternalServerError, resp.CodeInternal, "服务内部错误")
 						}
 					} else {
-						log.ErrorContext(c.Request.Context(), "panic", "error", v)
-						resp.Fail(c, 50000, "服务内部错误")
+						log.ErrorContext(c.Request.Context(), "panic", "error", v, "stack", string(debug.Stack()))
+						resp.FailStatus(c, http.StatusInternalServerError, resp.CodeInternal, "服务内部错误")
 					}
 				default:
-					log.ErrorContext(c.Request.Context(), "panic", "error", fmt.Sprintf("%v", r))
-					resp.Fail(c, 50000, "服务内部错误")
+					log.ErrorContext(c.Request.Context(), "panic", "error", fmt.Sprintf("%v", r), "stack", string(debug.Stack()))
+					resp.FailStatus(c, http.StatusInternalServerError, resp.CodeInternal, "服务内部错误")
 				}
 				c.Abort()
 			}

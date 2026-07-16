@@ -195,6 +195,16 @@ func TestMergeLayer_twoLayers(t *testing.T) {
 	}
 }
 
+func TestMergeLayerRejectsSensitiveValues(t *testing.T) {
+	base := viper.New()
+	base.SetConfigType("yaml")
+	base.ReadConfig(strings.NewReader("server:\n  name: base\n"))
+	err := mergeLayer(base, []byte("jwt:\n  secret: leaked\n"), "yaml")
+	if err == nil || !strings.Contains(err.Error(), "jwt.secret") {
+		t.Fatalf("expected sensitive remote config error, got %v", err)
+	}
+}
+
 func TestMergeConfigLayersRebuildsFromLocalBase(t *testing.T) {
 	base := &Config{
 		Server: ServerConfig{Name: "local", Addr: ":8080", Mode: "debug"},

@@ -3,7 +3,6 @@ package apis
 import (
 	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service/dto"
@@ -23,12 +22,25 @@ func NewTaskCommentAPI() *TaskCommentAPI {
 }
 
 func (a *TaskCommentAPI) List(c *gin.Context) {
-	taskID, _ := strconv.ParseInt(c.Param("task_id"), 10, 64)
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
+	workspaceID, ok := requireWorkspace(c)
+	if !ok {
+		return
+	}
+	taskID, ok := parsePositiveID(c, "task_id")
+	if !ok {
+		return
+	}
+	page, size, ok := parsePagination(c)
+	if !ok {
+		return
+	}
 
-	list, total, err := a.svc.List(c, taskID, base.ListOpts{Page: page, Size: size})
+	list, total, err := a.svc.List(c, workspaceID, taskID, base.ListOpts{Page: page, Size: size})
 	if err != nil {
+		if errors.Is(err, service.ErrTaskNotFound) {
+			resp.FailStatus(c, http.StatusNotFound, resp.CodeNotFound, "任务不存在")
+			return
+		}
 		log.ErrorContext(c.Request.Context(), "list task comments failed", "task_id", taskID, "error", err)
 		resp.FailStatus(c, http.StatusInternalServerError, resp.CodeDBError, "数据库错误")
 		return
@@ -37,7 +49,14 @@ func (a *TaskCommentAPI) List(c *gin.Context) {
 }
 
 func (a *TaskCommentAPI) Create(c *gin.Context) {
-	taskID, _ := strconv.ParseInt(c.Param("task_id"), 10, 64)
+	workspaceID, ok := requireWorkspace(c)
+	if !ok {
+		return
+	}
+	taskID, ok := parsePositiveID(c, "task_id")
+	if !ok {
+		return
+	}
 	uid := mid.GetUID(c)
 	if uid == 0 {
 		resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
@@ -50,8 +69,12 @@ func (a *TaskCommentAPI) Create(c *gin.Context) {
 		return
 	}
 
-	comment, err := a.svc.Create(c, taskID, uid, req)
+	comment, err := a.svc.Create(c, workspaceID, taskID, uid, req)
 	if err != nil {
+		if errors.Is(err, service.ErrTaskNotFound) {
+			resp.FailStatus(c, http.StatusNotFound, resp.CodeNotFound, "任务不存在")
+			return
+		}
 		log.ErrorContext(c.Request.Context(), "create task comment failed", "task_id", taskID, "error", err)
 		resp.FailStatus(c, http.StatusInternalServerError, resp.CodeDBError, "数据库错误")
 		return
@@ -60,8 +83,24 @@ func (a *TaskCommentAPI) Create(c *gin.Context) {
 }
 
 func (a *TaskCommentAPI) Delete(c *gin.Context) {
-	id, _ := strconv.ParseInt(c.Param("comment_id"), 10, 64)
-	if err := a.svc.Delete(c, id); err != nil {
+	workspaceID, ok := requireWorkspace(c)
+	if !ok {
+		return
+	}
+	taskID, ok := parsePositiveID(c, "task_id")
+	if !ok {
+		return
+	}
+	id, ok := parsePositiveID(c, "comment_id")
+	if !ok {
+		return
+	}
+	uid := mid.GetUID(c)
+	if uid <= 0 {
+		resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
+		return
+	}
+	if err := a.svc.Delete(c, workspaceID, taskID, id, uid); err != nil {
 		if errors.Is(err, service.ErrTaskCommentNotFound) {
 			resp.FailStatus(c, http.StatusNotFound, resp.CodeNotFound, "评论不存在")
 			return

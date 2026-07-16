@@ -8,6 +8,7 @@ import (
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service/dto"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/store"
 	base "github.com/baowk/dilu-go-kit/store"
+	"gorm.io/gorm"
 )
 
 var ErrTaskCommentNotFound = errors.New("task comment not found")
@@ -19,15 +20,28 @@ func NewTaskCommentService() *TaskCommentService {
 	return &TaskCommentService{}
 }
 
-func (s *TaskCommentService) List(ctx context.Context, taskID int64, opts base.ListOpts) ([]*model.TaskComment, int64, error) {
-	return store.S().TaskComment.ListByTaskID(ctx, taskID, opts)
+func (s *TaskCommentService) List(ctx context.Context, workspaceID, taskID int64, opts base.ListOpts) ([]*model.TaskComment, int64, error) {
+	if _, err := store.S().Task.GetByID(ctx, workspaceID, taskID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, 0, ErrTaskNotFound
+		}
+		return nil, 0, err
+	}
+	return store.S().TaskComment.ListByTaskID(ctx, workspaceID, taskID, opts)
 }
 
-func (s *TaskCommentService) Create(ctx context.Context, taskID, userID int64, req dto.CreateTaskCommentReq) (*model.TaskComment, error) {
+func (s *TaskCommentService) Create(ctx context.Context, workspaceID, taskID, userID int64, req dto.CreateTaskCommentReq) (*model.TaskComment, error) {
+	if _, err := store.S().Task.GetByID(ctx, workspaceID, taskID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTaskNotFound
+		}
+		return nil, err
+	}
 	comment := &model.TaskComment{
-		TaskID:  taskID,
-		UserID:  userID,
-		Content: req.Content,
+		WorkspaceID: workspaceID,
+		TaskID:      taskID,
+		UserID:      userID,
+		Content:     req.Content,
 	}
 	if err := store.S().TaskComment.Create(ctx, comment); err != nil {
 		return nil, err
@@ -35,8 +49,8 @@ func (s *TaskCommentService) Create(ctx context.Context, taskID, userID int64, r
 	return comment, nil
 }
 
-func (s *TaskCommentService) Delete(ctx context.Context, id int64) error {
-	rows, err := store.S().TaskComment.Delete(ctx, id)
+func (s *TaskCommentService) Delete(ctx context.Context, workspaceID, taskID, id, userID int64) error {
+	rows, err := store.S().TaskComment.Delete(ctx, workspaceID, taskID, id, userID)
 	if err != nil {
 		return err
 	}

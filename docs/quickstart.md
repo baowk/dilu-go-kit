@@ -68,7 +68,11 @@ func main() {
                 KeyPrefix: "my-service:ratelimit",
             },
         })
-        router.Init(a.Gin, a.Config.JWT.Secret)
+        cfg := a.GetConfig()
+        router.Init(a.Gin, mid.JWTConfig{
+            Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer,
+            Audience: cfg.JWT.Audience,
+        })
         return nil
     })
 }
@@ -112,6 +116,11 @@ registry:
   endpoints:
     - "127.0.0.1:2379"
   # configKey: "/config/"   # 启用远程配置（自动拼 server.name）
+
+jwt:
+  secret: ""                # 使用 JWT_SECRET 注入
+  issuer: auth-service
+  audience: ["my-service"]
 ```
 
 ### 3.1 数据库迁移
@@ -131,11 +140,12 @@ package model
 import "time"
 
 type Task struct {
-    ID        int64     `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
-    Title     string    `gorm:"column:title;size:200" json:"title"`
-    Status    int16     `gorm:"column:status;default:1" json:"status"`
-    CreatedAt time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-    UpdatedAt time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+    ID          int64     `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+    WorkspaceID int64     `gorm:"column:workspace_id;index" json:"workspace_id"`
+    Title       string    `gorm:"column:title;size:200" json:"title"`
+    Status      int16     `gorm:"column:status;default:1" json:"status"`
+    CreatedAt   time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+    UpdatedAt   time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 }
 
 func (Task) TableName() string { return "task" }
@@ -157,11 +167,11 @@ import (
 )
 
 type TaskStore interface {
-    GetByID(ctx context.Context, id int64) (*model.Task, error)
-    List(ctx context.Context, opts base.ListOpts) ([]*model.Task, int64, error)
+    GetByID(ctx context.Context, workspaceID, id int64) (*model.Task, error)
+    List(ctx context.Context, workspaceID int64, opts base.ListOpts) ([]*model.Task, int64, error)
     Create(ctx context.Context, t *model.Task) error
-    Update(ctx context.Context, id int64, updates map[string]any) (int64, error)
-    Delete(ctx context.Context, id int64) (int64, error)
+    Update(ctx context.Context, workspaceID, id int64, updates map[string]any) (int64, error)
+    Delete(ctx context.Context, workspaceID, id int64) (int64, error)
 }
 
 type Stores struct{ Task TaskStore }
@@ -187,15 +197,15 @@ import (
 
 type pgTaskStore struct{ db *gorm.DB }
 
-func (s *pgTaskStore) GetByID(ctx context.Context, id int64) (*model.Task, error) {
+func (s *pgTaskStore) GetByID(ctx context.Context, workspaceID, id int64) (*model.Task, error) {
     var t model.Task
-    err := s.db.WithContext(ctx).Where("id = ?", id).First(&t).Error
+    err := s.db.WithContext(ctx).Where("workspace_id = ? AND id = ?", workspaceID, id).First(&t).Error
     return &t, err
 }
 
-func (s *pgTaskStore) List(ctx context.Context, opts base.ListOpts) ([]*model.Task, int64, error) {
+func (s *pgTaskStore) List(ctx context.Context, workspaceID int64, opts base.ListOpts) ([]*model.Task, int64, error) {
     var total int64
-    q := s.db.WithContext(ctx).Model(&model.Task{})
+    q := s.db.WithContext(ctx).Model(&model.Task{}).Where("workspace_id = ?", workspaceID)
     if err := q.Count(&total).Error; err != nil {
         return nil, 0, err
     }
@@ -208,13 +218,13 @@ func (s *pgTaskStore) Create(ctx context.Context, t *model.Task) error {
     return s.db.WithContext(ctx).Create(t).Error
 }
 
-func (s *pgTaskStore) Update(ctx context.Context, id int64, updates map[string]any) (int64, error) {
-    r := s.db.WithContext(ctx).Model(&model.Task{}).Where("id = ?", id).Updates(updates)
+func (s *pgTaskStore) Update(ctx context.Context, workspaceID, id int64, updates map[string]any) (int64, error) {
+    r := s.db.WithContext(ctx).Model(&model.Task{}).Where("workspace_id = ? AND id = ?", workspaceID, id).Updates(updates)
     return r.RowsAffected, r.Error
 }
 
-func (s *pgTaskStore) Delete(ctx context.Context, id int64) (int64, error) {
-    r := s.db.WithContext(ctx).Where("id = ?", id).Delete(&model.Task{})
+func (s *pgTaskStore) Delete(ctx context.Context, workspaceID, id int64) (int64, error) {
+    r := s.db.WithContext(ctx).Where("workspace_id = ? AND id = ?", workspaceID, id).Delete(&model.Task{})
     return r.RowsAffected, r.Error
 }
 ```
@@ -229,6 +239,7 @@ import (
     "net/http"
     "strconv"
     "github.com/gin-gonic/gin"
+    "github.com/baowk/dilu-go-kit/mid"
     "github.com/baowk/dilu-go-kit/resp"
     base "github.com/baowk/dilu-go-kit/store"
     "my-service/internal/xxx/store"
@@ -239,7 +250,12 @@ type TaskAPI struct{}
 func (a *TaskAPI) List(c *gin.Context) {
     page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
     size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
-    list, total, err := store.S().Task.List(c, base.ListOpts{Page: page, Size: size})
+    workspaceID := mid.GetWorkspaceID(c)
+    if workspaceID <= 0 {
+        resp.FailStatus(c, http.StatusForbidden, resp.CodeForbidden, "缺少工作区权限")
+        return
+    }
+    list, total, err := store.S().Task.List(c, workspaceID, base.ListOpts{Page: page, Size: size})
     if err != nil {
         resp.FailStatus(c, http.StatusInternalServerError, resp.CodeDBError, "数据库错误")
         return
@@ -260,10 +276,11 @@ import (
     "my-service/internal/xxx/apis"
 )
 
-func Init(r *gin.Engine, jwtSecret string) {
+func Init(r *gin.Engine, jwtConfig mid.JWTConfig) {
     api := &apis.TaskAPI{}
     // JWT secret 从 boot.Config 读取，在 main.go 传入或从配置获取
-    auth := r.Group("/v1/tasks").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
+    // JWT 必须包含 exp 和 workspace_id（或 wid）claim
+    auth := r.Group("/v1/tasks").Use(mid.JWT(jwtConfig))
     // Handler 中可通过 mid.GetUID/GetTenantID/GetShopIDs/GetScopes 获取身份上下文
     {
         auth.GET("", api.List)

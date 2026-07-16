@@ -3,6 +3,13 @@ server:
   addr: ":8080"                    # listen address
   # advertiseAddr: "10.0.1.5:8080" # service discovery address; inferred from addr when empty
   mode: debug
+  readHeaderTimeout: 5
+  readTimeout: 15
+  writeTimeout: 30
+  idleTimeout: 60
+  shutdownTimeout: 10
+  maxHeaderBytes: 1048576
+  trustedProxies: []              # set trusted gateway CIDRs in production
 
 # log:
 #   output: console             # "console" (default) | "file" | "both"
@@ -19,6 +26,8 @@ database:
     maxIdle: 10
     maxOpen: 50
     maxLifetime: 3600
+    pingOnOpen: true
+    prepareStmt: true
 
 redis:
   addr: "127.0.0.1:6379"
@@ -27,6 +36,19 @@ redis:
 jwt:
   secret: "" # use JWT_SECRET in shared configs
   expires: 1440
+  issuer: demo-auth
+  audience: ["demo-service"]
+
+cors:
+  enable: true
+  mode: allow-all                 # use whitelist in production
+
+accessLimit:
+  enable: true
+  total: 300
+  duration: 5
+  backend: redis
+  keyPrefix: "demo-service:ratelimit"
 
 grpc:
   enable: false
@@ -38,6 +60,7 @@ registry:
   type: etcd                     # "etcd" or "consul"
   endpoints:                     # etcd endpoints
     - "127.0.0.1:2379"
+  dialTimeout: 5
   # address: "127.0.0.1:8500"   # consul address (used when type: consul)
   # token: ""                    # consul ACL token (optional)
   # configKey: "/config/"        # enable remote config: auto key = configKey + server.name

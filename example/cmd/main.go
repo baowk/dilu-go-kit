@@ -16,14 +16,27 @@ func main() {
 	}
 
 	if err := app.Run(func(a *boot.App) error {
+		cfg := a.GetConfig()
 		// Init store
 		store.Init(a.DB("main"))
 
 		// Middleware
-		a.Gin.Use(mid.Recovery(), mid.CORS())
+		mid.Default(a.Gin, mid.DefaultConfig{
+			CORS: mid.CORSCfg{
+				Enable: cfg.CORS.Enable, Mode: cfg.CORS.Mode, Whitelist: cfg.CORS.Whitelist,
+			},
+			AccessLimit: mid.AccessLimitCfg{
+				Enable: cfg.AccessLimit.Enable, Total: cfg.AccessLimit.Total,
+				Duration: cfg.AccessLimit.Duration, Backend: cfg.AccessLimit.Backend,
+				Redis: a.Redis, KeyPrefix: cfg.AccessLimit.KeyPrefix,
+			},
+		})
 
 		// Routes
-		router.Init(a.Gin, a.Config.JWT.Secret)
+		router.Init(a.Gin, mid.JWTConfig{
+			Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer,
+			Subject: cfg.JWT.Subject, Audience: cfg.JWT.Audience,
+		})
 
 		return nil
 	}); err != nil {

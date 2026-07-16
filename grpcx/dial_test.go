@@ -2,8 +2,11 @@ package grpcx
 
 import (
 	"crypto/tls"
+	"net"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
 )
 
 func TestNormalizeDialOptionDefaults(t *testing.T) {
@@ -22,6 +25,22 @@ func TestNormalizeDialOptionDefaults(t *testing.T) {
 	}
 }
 
+func TestDialWaitsForReadyConnection(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := grpc.NewServer()
+	go server.Serve(listener)
+	defer server.Stop()
+
+	conn, err := Dial(listener.Addr().String(), DialOption{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+}
+
 func TestTransportCredentialsDefaultInsecure(t *testing.T) {
 	creds := DialOption{}.transportCredentials()
 	if got := creds.Info().SecurityProtocol; got != "insecure" {
@@ -38,8 +57,27 @@ func TestTransportCredentialsTLS(t *testing.T) {
 
 func TestRetryServiceConfigCanDisableRetries(t *testing.T) {
 	opt := normalizeDialOption(DialOption{RetryMaxAttempts: 1})
-	if got := opt.retryServiceConfig(); got != `{"methodConfig":[{"name":[{}]}]}` {
+	if got := opt.retryServiceConfig(); got != `{"methodConfig":[]}` {
 		t.Fatalf("retry config = %s", got)
+	}
+}
+
+func TestRetryRequiresExplicitMethods(t *testing.T) {
+	opt := normalizeDialOption(DialOption{RetryMaxAttempts: 3})
+	if err := opt.validate(); err == nil {
+		t.Fatal("expected retries without methods to be rejected")
+	}
+
+	opt.RetryMethods = []string{"/demo.TaskService/Get"}
+	if err := opt.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	config, err := opt.retryServiceConfigValidated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config == "" {
+		t.Fatal("expected retry service config")
 	}
 }
 

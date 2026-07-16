@@ -4,6 +4,7 @@ package clientx
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"time"
 )
 
@@ -15,12 +16,14 @@ type RetryConfig struct {
 	Multiplier     float64
 	Retryable      func(error) bool
 	Sleep          func(context.Context, time.Duration) error
+	JitterFraction float64
+	DisableJitter  bool
 }
 
 // Do executes fn with retry. MaxAttempts includes the first attempt.
 func Do(ctx context.Context, cfg RetryConfig, fn func(context.Context) error) error {
 	if fn == nil {
-		return nil
+		return ErrNilOperation
 	}
 	cfg = normalizeRetryConfig(cfg)
 	var last error
@@ -37,7 +40,7 @@ func Do(ctx context.Context, cfg RetryConfig, fn func(context.Context) error) er
 		if attempt == cfg.MaxAttempts || !cfg.Retryable(err) {
 			return err
 		}
-		if sleepErr := cfg.Sleep(ctx, backoff); sleepErr != nil {
+		if sleepErr := cfg.Sleep(ctx, jitterBackoff(backoff, cfg.JitterFraction)); sleepErr != nil {
 			return sleepErr
 		}
 		backoff = nextBackoff(backoff, cfg.MaxBackoff, cfg.Multiplier)
@@ -64,7 +67,27 @@ func normalizeRetryConfig(cfg RetryConfig) RetryConfig {
 	if cfg.Sleep == nil {
 		cfg.Sleep = sleepContext
 	}
+	if cfg.DisableJitter {
+		cfg.JitterFraction = 0
+	} else if cfg.JitterFraction <= 0 {
+		cfg.JitterFraction = 0.2
+	}
+	if cfg.JitterFraction > 1 {
+		cfg.JitterFraction = 1
+	}
 	return cfg
+}
+
+func jitterBackoff(d time.Duration, fraction float64) time.Duration {
+	if d <= 0 || fraction <= 0 {
+		return d
+	}
+	delta := (rand.Float64()*2 - 1) * fraction
+	result := time.Duration(float64(d) * (1 + delta))
+	if result < 0 {
+		return 0
+	}
+	return result
 }
 
 func nextBackoff(current, max time.Duration, multiplier float64) time.Duration {

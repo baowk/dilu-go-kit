@@ -19,6 +19,7 @@ func Trace() gin.HandlerFunc {
 		if traceID == "" {
 			traceID = c.GetHeader(RequestHeader)
 		}
+		traceID = validTraceID(traceID)
 		if traceID == "" {
 			traceID = uuid.NewString()
 		}
@@ -36,6 +37,21 @@ func Trace() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func validTraceID(traceID string) string {
+	if traceID == "" || len(traceID) > 128 {
+		return ""
+	}
+	for i := 0; i < len(traceID); i++ {
+		c := traceID[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return ""
+	}
+	return traceID
 }
 
 // GetTraceID extracts the trace ID from a Gin context.

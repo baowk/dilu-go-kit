@@ -17,6 +17,8 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 
 ## 安装
 
+要求 Go 1.25.8 或更高版本。
+
 ```bash
 go get github.com/baowk/dilu-go-kit@latest
 ```
@@ -120,9 +122,14 @@ r.Use(mid.RateLimitFromConfig(mid.AccessLimitCfg{
     KeyPrefix: "gateway:ratelimit",
 }))
 
-// JWT 认证
-auth := r.Group("/v1").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
+// JWT 认证：token 必须包含 exp；workspace_id/wid 使用整数或十进制字符串
+auth := r.Group("/v1").Use(mid.JWT(mid.JWTConfig{
+    Secret: jwtSecret,
+    Issuer: "auth-service",
+    Audience: []string{"my-service"},
+}))
 uid := mid.GetUID(c)
+workspaceID := mid.GetWorkspaceID(c)
 tenantID := mid.GetTenantID(c)
 shopIDs := mid.GetShopIDs(c)
 scopes := mid.GetScopes(c)
@@ -132,6 +139,7 @@ nickname := mid.GetNickname(c)
 r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
     HeaderUID:      "x-user-id",
     HeaderTenantID: "x-tenant-id",
+    HeaderWorkspaceID: "x-workspace-id",
     HeaderShopIDs:  "x-shop-ids", // "1,2,3"
     HeaderScopes:   "x-scopes",   // "order.read,order.write"
     TrustHeaderUID: true,
@@ -147,6 +155,7 @@ gRPC 客户端默认明文，仅适合可信内网；跨网络或零信任环境
 conn, _ := grpcx.Dial(addr, grpcx.DialOption{
     TLSConfig: &tls.Config{ServerName: "mf-user.internal"},
     RetryMaxAttempts: 3,
+    RetryMethods: []string{"/user.UserService/Get"}, // 只列幂等方法
 })
 ```
 
@@ -176,11 +185,7 @@ if err != nil {
 ## 标准错误码
 
 ```go
-resp.Fail(c, resp.CodeUnauthorized, "未登录")   // 40101
-resp.Fail(c, resp.CodeForbidden, "无权操作")     // 40301
-resp.Fail(c, resp.CodeInvalidParam, "参数错误")  // 40001
-resp.Fail(c, resp.CodeNotFound, "不存在")        // 40401
-resp.Fail(c, resp.CodeInternal, "服务错误")      // 50000
+resp.Fail(c, resp.CodeConflict, "冲突") // 兼容旧协议：HTTP 200 + 业务错误码
 resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 ```
 
@@ -189,8 +194,9 @@ resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 ```go
 import "github.com/baowk/dilu-go-kit/notify"
 
-notify.Init("http://mf-ws:9020")
+_ = notify.InitConfig(notify.Config{BaseURL: "http://mf-ws:9020", Token: token})
 notify.Send("env", map[string]any{"action": "created", "env_id": 123, "workspace_id": 1})
+err := notify.SendContextE(ctx, "proxy", payload) // 需要确认送达时使用
 notify.SendContext(ctx, "proxy", payload)  // 自动携带 traceId
 ```
 
@@ -211,6 +217,12 @@ msgs, err := stream.ReadGroup(ctx, app.Redis, stream.ReaderConfig{
     Group: "sync-worker",
     Consumer: "worker-1",
 })
+stale, next, err := stream.ClaimStale(ctx, app.Redis, stream.ClaimConfig{
+    Stream: "sync.tasks", Group: "sync-worker", Consumer: "worker-1",
+    MinIdle: time.Minute, Start: "0-0",
+})
+_ = stale
+_ = next
 for _, msg := range msgs {
     // handle message idempotently
     _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
@@ -273,13 +285,15 @@ registry:
 本地 YAML → /config/mf-user → /config/mf-user/node-1
 ```
 
-运行时自动 watch，KV 变更秒级生效：
+运行时自动 watch。只有 `jwt/cors/accessLimit/notify` 等动态字段允许发布，并由
+`OnConfigApplied` 回调应用到运行中组件；
+`server/log/database/redis/grpc/registry` 属于启动字段，变更会被拒绝并要求重启：
 
 ```go
 app.OnConfigChange(func(cfg *boot.Config) error {
-    log.Info("config updated", "redis", cfg.Redis.Addr)
-    return nil  // 返回 error 可拒绝此次更新
+	return validateDynamicConfig(cfg) // 这里只做校验，不产生副作用
 })
+app.OnConfigApplied(func(cfg *boot.Config) { applyDynamicConfig(cfg) })
 ```
 
 同一服务多实例可用节点级配置区分：
@@ -299,7 +313,8 @@ REMOTE_NODE=node-2 SERVER_ADDR=:7802 SERVER_ADVERTISE_ADDR=10.0.1.6:7802 ./my-se
 
 ## 敏感配置
 
-密码、token、JWT secret 不建议写入 YAML 或远程配置。可用环境变量覆盖，优先级高于本地和远程配置：
+密码、token、JWT secret 不写入 YAML 或远程配置。release/production 模式会拒绝
+YAML 内联敏感值，远程配置在所有模式下都会拒绝 DSN/password/secret/token；使用环境变量注入：
 
 ```bash
 DATABASE_DSN='host=... user=... password=... dbname=...'
@@ -308,6 +323,7 @@ REDIS_PASSWORD='...'
 JWT_SECRET='...'
 REGISTRY_TOKEN='...'
 NOTIFY_WS_URL='http://mf-ws:9020'
+NOTIFY_TOKEN='...'
 REMOTE_NODE='node-1'
 ```
 
@@ -319,11 +335,20 @@ server:
   addr: ":8080"                  # 监听地址
   # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug
+  readHeaderTimeout: 5
+  readTimeout: 15
+  writeTimeout: 30
+  idleTimeout: 60
+  shutdownTimeout: 10
+  maxHeaderBytes: 1048576
+  trustedProxies: ["10.0.0.0/8"] # 仅填写可信网关 CIDR
 
 database:
   main:
     dsn: ""                    # 建议用 DATABASE_MAIN_DSN / DATABASE_DSN 注入
     slowThreshold: 200
+    pingOnOpen: true
+    prepareStmt: true
 
 redis:
   addr: "127.0.0.1:6379"
@@ -338,6 +363,8 @@ log:
 jwt:
   secret: ""                  # 建议用 JWT_SECRET 注入
   expires: 1440
+  issuer: auth-service
+  audience: ["my-service"]
 
 cors:
   enable: true
@@ -347,14 +374,18 @@ accessLimit:
   enable: true
   total: 300
   duration: 5
+  backend: redis
+  keyPrefix: "my-service:ratelimit"
 
 notify:
   wsUrl: "http://mf-ws:9020"
+  token: ""                    # 建议用 NOTIFY_TOKEN 注入
 
 registry:
   enable: true
   type: etcd                  # etcd / consul
   endpoints: ["127.0.0.1:2379"]
+  dialTimeout: 5
   # address: "127.0.0.1:8500"  # consul
   # token: ""                  # 建议用 REGISTRY_TOKEN 注入
   configKey: "/config/"       # 启用远程配置

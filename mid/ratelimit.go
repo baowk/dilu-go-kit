@@ -15,12 +15,13 @@ import (
 // the current process only; use a shared backend for global multi-instance
 // limits.
 type RateLimiter struct {
-	max     int
-	window  time.Duration
-	mu      sync.Mutex
-	clients map[string]*rateEntry
-	stop    chan struct{}
-	done    chan struct{}
+	max       int
+	window    time.Duration
+	mu        sync.Mutex
+	clients   map[string]*rateEntry
+	stop      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 type rateEntry struct {
@@ -80,13 +81,13 @@ func (l *RateLimiter) Middleware() gin.HandlerFunc {
 
 // Close stops the background cleanup goroutine.
 func (l *RateLimiter) Close() {
-	select {
-	case <-l.done:
+	if l == nil {
 		return
-	default:
 	}
-	close(l.stop)
-	<-l.done
+	l.closeOnce.Do(func() {
+		close(l.stop)
+		<-l.done
+	})
 }
 
 func (l *RateLimiter) cleanupLoop() {
@@ -125,6 +126,14 @@ type RedisRateLimiter struct {
 	keyPrefix string
 	keyFunc   func(*gin.Context) string
 }
+
+var redisRateLimitScript = redis.NewScript(`
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[1])
+end
+return count
+`)
 
 // RedisRateLimitConfig configures a Redis-backed rate limiter.
 type RedisRateLimitConfig struct {
@@ -195,14 +204,13 @@ func (l *RedisRateLimiter) Middleware() gin.HandlerFunc {
 }
 
 func (l *RedisRateLimiter) allow(ctx context.Context, key string) (bool, error) {
-	n, err := l.rdb.Incr(ctx, key).Result()
+	ttlMillis := l.window.Milliseconds()
+	if ttlMillis < 1 {
+		ttlMillis = 1
+	}
+	n, err := redisRateLimitScript.Run(ctx, l.rdb, []string{key}, ttlMillis).Int64()
 	if err != nil {
 		return false, err
-	}
-	if n == 1 {
-		if err := l.rdb.Expire(ctx, key, l.window).Err(); err != nil {
-			return false, err
-		}
 	}
 	return n <= int64(l.max), nil
 }

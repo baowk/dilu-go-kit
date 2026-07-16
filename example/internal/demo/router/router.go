@@ -6,12 +6,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func Init(r *gin.Engine, jwtSecret string) {
+func Init(r *gin.Engine, jwtConfig mid.JWTConfig) {
 	taskAPI := apis.NewTaskAPI()
 	commentAPI := apis.NewTaskCommentAPI()
 
 	v1 := r.Group("/v1/demo")
-	auth := v1.Group("").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
+	auth := v1.Group("").Use(mid.JWT(jwtConfig))
 	{
 		auth.GET("/tasks", taskAPI.List)
 		auth.POST("/tasks", taskAPI.Create)

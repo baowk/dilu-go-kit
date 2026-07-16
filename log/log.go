@@ -10,7 +10,11 @@
 //	log.With("service", "mf-user").Info("ready")
 package log
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"sync"
+)
 
 // Logger is the unified logging interface. All services depend on this,
 // never on a specific logging library directly.
@@ -31,15 +35,16 @@ type Logger interface {
 }
 
 var global Logger = newSlogLogger("debug", "", "", nil)
+var globalMu sync.RWMutex
 
 // FileConfig enables file logging with rotation via lumberjack.
 // Leave zero-value (or nil pointer) to disable file output.
 type FileConfig struct {
 	Path       string `mapstructure:"path"`       // log file path, e.g. "logs/app.log"
-	MaxSize    int    `mapstructure:"maxSize"`     // max size in MB before rotation (default 100)
-	MaxAge     int    `mapstructure:"maxAge"`      // max days to retain old files (default 7)
-	MaxBackups int    `mapstructure:"maxBackups"`  // max number of old files (default 5)
-	Compress   bool   `mapstructure:"compress"`    // gzip rotated files (default false)
+	MaxSize    int    `mapstructure:"maxSize"`    // max size in MB before rotation (default 100)
+	MaxAge     int    `mapstructure:"maxAge"`     // max days to retain old files (default 7)
+	MaxBackups int    `mapstructure:"maxBackups"` // max number of old files (default 5)
+	Compress   bool   `mapstructure:"compress"`   // gzip rotated files (default false)
 }
 
 func (f *FileConfig) maxSize() int {
@@ -71,6 +76,8 @@ func (f *FileConfig) maxBackups() int {
 //
 // output: "console" (default), "file", "both"
 func Init(mode, serviceName, output string, file *FileConfig) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
 	// Close previous logger's file handle if any
 	if sl, ok := global.(*slogLogger); ok && sl.closer != nil {
 		_ = sl.closer.Close()
@@ -79,21 +86,61 @@ func Init(mode, serviceName, output string, file *FileConfig) {
 }
 
 // SetLogger replaces the global logger with a custom implementation.
-func SetLogger(l Logger) { global = l }
+func SetLogger(l Logger) error {
+	if l == nil {
+		return fmt.Errorf("log: logger cannot be nil")
+	}
+	globalMu.Lock()
+	global = l
+	globalMu.Unlock()
+	return nil
+}
 
 // L returns the global logger instance.
-func L() Logger { return global }
+func L() Logger {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return global
+}
 
 // ── Package-level convenience functions ──
 
-func Debug(msg string, args ...any)   { global.Debug(msg, args...) }
-func Info(msg string, args ...any)    { global.Info(msg, args...) }
-func Warn(msg string, args ...any)    { global.Warn(msg, args...) }
-func Error(msg string, args ...any)   { global.Error(msg, args...) }
+func Debug(msg string, args ...any) { withLogger(func(l Logger) { l.Debug(msg, args...) }) }
+func Info(msg string, args ...any)  { withLogger(func(l Logger) { l.Info(msg, args...) }) }
+func Warn(msg string, args ...any)  { withLogger(func(l Logger) { l.Warn(msg, args...) }) }
+func Error(msg string, args ...any) { withLogger(func(l Logger) { l.Error(msg, args...) }) }
 
-func DebugContext(ctx context.Context, msg string, args ...any) { global.DebugContext(ctx, msg, args...) }
-func InfoContext(ctx context.Context, msg string, args ...any)  { global.InfoContext(ctx, msg, args...) }
-func WarnContext(ctx context.Context, msg string, args ...any)  { global.WarnContext(ctx, msg, args...) }
-func ErrorContext(ctx context.Context, msg string, args ...any) { global.ErrorContext(ctx, msg, args...) }
+func DebugContext(ctx context.Context, msg string, args ...any) {
+	withLogger(func(l Logger) { l.DebugContext(ctx, msg, args...) })
+}
+func InfoContext(ctx context.Context, msg string, args ...any) {
+	withLogger(func(l Logger) { l.InfoContext(ctx, msg, args...) })
+}
+func WarnContext(ctx context.Context, msg string, args ...any) {
+	withLogger(func(l Logger) { l.WarnContext(ctx, msg, args...) })
+}
+func ErrorContext(ctx context.Context, msg string, args ...any) {
+	withLogger(func(l Logger) { l.ErrorContext(ctx, msg, args...) })
+}
 
-func With(args ...any) Logger { return global.With(args...) }
+func With(args ...any) Logger {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return global.With(args...)
+}
+
+func withLogger(fn func(Logger)) {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	fn(global)
+}
+
+// Close closes the current logger's file output when present.
+func Close() error {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	if sl, ok := global.(*slogLogger); ok && sl.closer != nil {
+		return sl.closer.Close()
+	}
+	return nil
+}

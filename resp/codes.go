@@ -11,25 +11,25 @@ const (
 	CodeFormatError  = 40003
 
 	// 401xx — Authentication errors
-	CodeUnauthorized  = 40101
-	CodeTokenExpired  = 40102
-	CodeTokenInvalid  = 40103
+	CodeUnauthorized = 40101
+	CodeTokenExpired = 40102
+	CodeTokenInvalid = 40103
 
 	// 403xx — Permission errors
-	CodeForbidden     = 40301
-	CodeNoPermission  = 40302
+	CodeForbidden    = 40301
+	CodeNoPermission = 40302
 
 	// 404xx — Not found
-	CodeNotFound      = 40401
+	CodeNotFound = 40401
 
 	// 409xx — Conflict
-	CodeConflict      = 40901
+	CodeConflict = 40901
 
 	// 429xx — Rate limit
-	CodeTooManyReqs   = 42901
+	CodeTooManyReqs = 42901
 
 	// 500xx — Server errors
-	CodeInternal      = 50000
-	CodeDBError       = 50001
-	CodeServiceDown   = 50002
+	CodeInternal    = 50000
+	CodeDBError     = 50001
+	CodeServiceDown = 50002
 )

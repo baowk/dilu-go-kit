@@ -23,9 +23,9 @@ func (s *TaskService) List(ctx context.Context, wsID int64, opts base.ListOpts) 
 	return store.S().Task.List(ctx, wsID, opts)
 }
 
-func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq) (*model.Task, error) {
+func (s *TaskService) Create(ctx context.Context, workspaceID int64, req dto.CreateTaskReq) (*model.Task, error) {
 	task := &model.Task{
-		WorkspaceID: req.WorkspaceID,
+		WorkspaceID: workspaceID,
 		Title:       req.Title,
 		Status:      1,
 	}
@@ -35,7 +35,7 @@ func (s *TaskService) Create(ctx context.Context, req dto.CreateTaskReq) (*model
 	return task, nil
 }
 
-func (s *TaskService) Update(ctx context.Context, id int64, req dto.UpdateTaskReq) error {
+func (s *TaskService) Update(ctx context.Context, workspaceID, id int64, req dto.UpdateTaskReq) error {
 	updates := make(map[string]any)
 	if req.Title != "" {
 		updates["title"] = req.Title
@@ -47,7 +47,7 @@ func (s *TaskService) Update(ctx context.Context, id int64, req dto.UpdateTaskRe
 		return nil
 	}
 
-	rows, err := store.S().Task.Update(ctx, id, updates)
+	rows, err := store.S().Task.Update(ctx, workspaceID, id, updates)
 	if err != nil {
 		return err
 	}
@@ -57,8 +57,8 @@ func (s *TaskService) Update(ctx context.Context, id int64, req dto.UpdateTaskRe
 	return nil
 }
 
-func (s *TaskService) Delete(ctx context.Context, id int64) error {
-	rows, err := store.S().Task.Delete(ctx, id)
+func (s *TaskService) Delete(ctx context.Context, workspaceID, id int64) error {
+	rows, err := store.S().Task.Delete(ctx, workspaceID, id)
 	if err != nil {
 		return err
 	}

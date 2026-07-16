@@ -10,14 +10,14 @@ import (
 
 type pgTaskCommentStore struct{ db *gorm.DB }
 
-func (s *pgTaskCommentStore) GetByID(ctx context.Context, id int64) (*model.TaskComment, error) {
+func (s *pgTaskCommentStore) GetByID(ctx context.Context, workspaceID, taskID, id int64) (*model.TaskComment, error) {
 	var c model.TaskComment
-	err := s.db.WithContext(ctx).Where("id = ?", id).First(&c).Error
+	err := s.db.WithContext(ctx).Where("workspace_id = ? AND task_id = ? AND id = ?", workspaceID, taskID, id).First(&c).Error
 	return &c, err
 }
 
-func (s *pgTaskCommentStore) ListByTaskID(ctx context.Context, taskID int64, opts base.ListOpts) ([]*model.TaskComment, int64, error) {
-	q := s.db.WithContext(ctx).Model(&model.TaskComment{}).Where("task_id = ?", taskID)
+func (s *pgTaskCommentStore) ListByTaskID(ctx context.Context, workspaceID, taskID int64, opts base.ListOpts) ([]*model.TaskComment, int64, error) {
+	q := s.db.WithContext(ctx).Model(&model.TaskComment{}).Where("workspace_id = ? AND task_id = ?", workspaceID, taskID)
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -31,7 +31,9 @@ func (s *pgTaskCommentStore) Create(ctx context.Context, c *model.TaskComment) e
 	return s.db.WithContext(ctx).Create(c).Error
 }
 
-func (s *pgTaskCommentStore) Delete(ctx context.Context, id int64) (int64, error) {
-	r := s.db.WithContext(ctx).Where("id = ?", id).Delete(&model.TaskComment{})
+func (s *pgTaskCommentStore) Delete(ctx context.Context, workspaceID, taskID, id, userID int64) (int64, error) {
+	r := s.db.WithContext(ctx).
+		Where("workspace_id = ? AND task_id = ? AND id = ? AND user_id = ?", workspaceID, taskID, id, userID).
+		Delete(&model.TaskComment{})
 	return r.RowsAffected, r.Error
 }

@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -25,6 +26,13 @@ func TestNormalize(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("normalize mismatch\nwant=%#v\ngot=%#v", want, got)
+	}
+}
+
+func TestClaimStaleRequiresPositiveMinIdle(t *testing.T) {
+	_, _, err := ClaimStale(context.Background(), nil, ClaimConfig{})
+	if err == nil {
+		t.Fatal("expected validation error")
 	}
 }
 

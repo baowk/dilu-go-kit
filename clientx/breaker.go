@@ -8,6 +8,7 @@ import (
 )
 
 var ErrCircuitOpen = errors.New("circuit breaker open")
+var ErrNilOperation = errors.New("clientx: operation is nil")
 
 type BreakerState int
 
@@ -19,13 +20,16 @@ const (
 
 // Breaker is a small client-side circuit breaker.
 type Breaker struct {
-	mu        sync.Mutex
-	state     BreakerState
-	failures  int
-	threshold int
-	openUntil time.Time
-	cooldown  time.Duration
-	now       func() time.Time
+	mu            sync.Mutex
+	state         BreakerState
+	failures      int
+	threshold     int
+	openUntil     time.Time
+	cooldown      time.Duration
+	now           func() time.Time
+	shouldCount   func(error) bool
+	halfOpenProbe bool
+	generation    uint64
 }
 
 // BreakerConfig configures a circuit breaker.
@@ -33,6 +37,7 @@ type BreakerConfig struct {
 	FailureThreshold int
 	Cooldown         time.Duration
 	Now              func() time.Time
+	ShouldCount      func(error) bool
 }
 
 // NewBreaker creates a circuit breaker.
@@ -49,16 +54,27 @@ func NewBreaker(cfg BreakerConfig) *Breaker {
 	if now == nil {
 		now = time.Now
 	}
-	return &Breaker{threshold: threshold, cooldown: cooldown, now: now}
+	shouldCount := cfg.ShouldCount
+	if shouldCount == nil {
+		shouldCount = func(err error) bool { return err != nil }
+	}
+	return &Breaker{threshold: threshold, cooldown: cooldown, now: now, shouldCount: shouldCount}
 }
 
 // Do executes fn when the circuit allows it.
 func (b *Breaker) Do(ctx context.Context, fn func(context.Context) error) error {
-	if err := b.before(); err != nil {
+	if fn == nil {
+		return ErrNilOperation
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	err := fn(ctx)
-	b.after(err)
+	permit, err := b.before()
+	if err != nil {
+		return err
+	}
+	err = fn(ctx)
+	b.after(permit, err)
 	return err
 }
 
@@ -69,27 +85,63 @@ func (b *Breaker) State() BreakerState {
 	return b.currentStateLocked()
 }
 
-func (b *Breaker) before() error {
+type breakerPermit struct {
+	generation uint64
+	halfOpen   bool
+}
+
+func (b *Breaker) before() (breakerPermit, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.currentStateLocked() == BreakerOpen {
-		return ErrCircuitOpen
+		return breakerPermit{}, ErrCircuitOpen
 	}
-	return nil
+	permit := breakerPermit{generation: b.generation}
+	if b.state == BreakerHalfOpen {
+		if b.halfOpenProbe {
+			return breakerPermit{}, ErrCircuitOpen
+		}
+		b.halfOpenProbe = true
+		permit.halfOpen = true
+	}
+	return permit, nil
 }
 
-func (b *Breaker) after(err error) {
+func (b *Breaker) after(permit breakerPermit, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if permit.generation != b.generation {
+		return
+	}
+	if permit.halfOpen && b.state == BreakerHalfOpen {
+		b.halfOpenProbe = false
+		if err == nil {
+			b.failures = 0
+			b.state = BreakerClosed
+			b.generation++
+			return
+		}
+		b.state = BreakerOpen
+		b.openUntil = b.now().Add(b.cooldown)
+		b.generation++
+		return
+	}
+	if b.state != BreakerClosed {
+		return
+	}
 	if err == nil {
 		b.failures = 0
 		b.state = BreakerClosed
+		return
+	}
+	if !b.shouldCount(err) {
 		return
 	}
 	b.failures++
 	if b.failures >= b.threshold {
 		b.state = BreakerOpen
 		b.openUntil = b.now().Add(b.cooldown)
+		b.generation++
 	}
 }
 

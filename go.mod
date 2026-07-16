@@ -1,6 +1,6 @@
 module github.com/baowk/dilu-go-kit
 
-go 1.26.5
+go 1.25.8
 
 require (
 	github.com/gin-gonic/gin v1.12.0
@@ -11,6 +11,7 @@ require (
 	github.com/prometheus/client_golang v1.23.2
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/spf13/viper v1.21.0
+	go.etcd.io/etcd/api/v3 v3.6.9
 	go.etcd.io/etcd/client/v3 v3.6.9
 	google.golang.org/grpc v1.79.3
 	gopkg.in/lumberjack.v2 v2.0.0
@@ -81,7 +82,6 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
-	go.etcd.io/etcd/api/v3 v3.6.9 // indirect
 	go.etcd.io/etcd/client/pkg/v3 v3.6.9 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect

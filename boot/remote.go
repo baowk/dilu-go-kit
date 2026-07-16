@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/baowk/dilu-go-kit/log"
@@ -22,10 +23,11 @@ var ErrRemoteConfigNotFound = errors.New("remote config key not found")
 
 // configKeyPrefix returns the config key prefix, default "/config/".
 func (r *RegistryConfig) configKeyPrefix() string {
-	if r.ConfigKey != "" {
-		return r.ConfigKey
+	prefix := r.ConfigKey
+	if prefix == "" {
+		prefix = "/config/"
 	}
-	return "/config/"
+	return strings.TrimRight(prefix, "/") + "/"
 }
 
 // resolveConfigKey returns the service-level KV key: configKey + serviceName.
@@ -39,7 +41,7 @@ func (r *RegistryConfig) resolveConfigNodeKey(serviceName string) string {
 	if node == "" {
 		return ""
 	}
-	return r.resolveConfigKey(serviceName) + "/" + node
+	return r.resolveConfigKey(serviceName) + "/" + strings.Trim(node, "/")
 }
 
 func (r *RegistryConfig) configNode() string {
@@ -163,6 +165,8 @@ func mergeRemoteConfig(reg RegistryConfig, serviceName string, base *Config, all
 		nodeData, err = fetchRemoteByKey(reg, nodeKey)
 		if err == nil {
 			log.Info("remote config: node override applied", "key", nodeKey)
+		} else if !errors.Is(err, ErrRemoteConfigNotFound) {
+			return err
 		}
 		// missing node key is fine — just skip
 	}
@@ -174,7 +178,10 @@ func mergeConfigLayers(base *Config, format string, serviceData, nodeData []byte
 	// Load local base into viper via JSON round-trip
 	merged := viper.New()
 	merged.SetConfigType("json")
-	buf, _ := json.Marshal(base)
+	buf, err := json.Marshal(base)
+	if err != nil {
+		return fmt.Errorf("remote config: encode local: %w", err)
+	}
 	if err := merged.ReadConfig(bytes.NewReader(buf)); err != nil {
 		return fmt.Errorf("remote config: encode local: %w", err)
 	}
@@ -247,14 +254,48 @@ func watchEtcd(ctx context.Context, reg RegistryConfig, key string, onChange fun
 	}
 	defer cli.Close()
 
-	ch := cli.Watch(ctx, key)
-	for resp := range ch {
-		for _, ev := range resp.Events {
-			if ev.Kv != nil && ev.Kv.Value != nil {
-				onChange(ev.Kv.Value)
-			} else if ev.Type == clientv3.EventTypeDelete {
+	var nextRevision int64
+	for ctx.Err() == nil {
+		if nextRevision == 0 {
+			current, err := cli.Get(ctx, key)
+			if err != nil {
+				log.Warn("remote config: etcd snapshot failed", "key", key, "error", err)
+				if err := waitContext(ctx, time.Second); err != nil {
+					return err
+				}
+				continue
+			}
+			nextRevision = current.Header.Revision + 1
+			if len(current.Kvs) > 0 {
+				onChange(current.Kvs[0].Value)
+			} else {
 				onChange(nil)
 			}
+		}
+		opts := []clientv3.OpOption{}
+		if nextRevision > 0 {
+			opts = append(opts, clientv3.WithRev(nextRevision))
+		}
+		ch := cli.Watch(ctx, key, opts...)
+		for resp := range ch {
+			if err := resp.Err(); err != nil {
+				log.Warn("remote config: etcd watch interrupted", "key", key, "error", err)
+				nextRevision = 0
+				break
+			}
+			if resp.Header.Revision > 0 {
+				nextRevision = resp.Header.Revision + 1
+			}
+			for _, ev := range resp.Events {
+				if ev.Type == clientv3.EventTypeDelete {
+					onChange(nil)
+				} else if ev.Kv != nil {
+					onChange(ev.Kv.Value)
+				}
+			}
+		}
+		if err := waitContext(ctx, time.Second); err != nil {
+			return err
 		}
 	}
 	return ctx.Err()
@@ -283,7 +324,9 @@ func fetchConsul(reg RegistryConfig, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	pair, _, err := cli.KV().Get(key, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pair, _, err := cli.KV().Get(key, (&consul.QueryOptions{}).WithContext(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("remote config: consul get %q: %w", key, err)
 	}
@@ -307,13 +350,16 @@ func watchConsul(ctx context.Context, reg RegistryConfig, key string, onChange f
 		default:
 		}
 
-		pair, meta, err := cli.KV().Get(key, &consul.QueryOptions{
+		query := (&consul.QueryOptions{
 			WaitIndex: lastIndex,
 			WaitTime:  55 * time.Second,
-		})
+		}).WithContext(ctx)
+		pair, meta, err := cli.KV().Get(key, query)
 		if err != nil {
 			log.Warn("remote config: consul watch error, retrying", "error", err)
-			time.Sleep(2 * time.Second)
+			if err := waitContext(ctx, 2*time.Second); err != nil {
+				return err
+			}
 			continue
 		}
 		if meta != nil && meta.LastIndex != lastIndex {
@@ -324,6 +370,17 @@ func watchConsul(ctx context.Context, reg RegistryConfig, key string, onChange f
 				onChange(nil)
 			}
 		}
+	}
+}
+
+func waitContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -347,5 +404,41 @@ func mergeLayer(v *viper.Viper, data []byte, format string) error {
 	if err := layer.ReadConfig(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("parse %s: %w", format, err)
 	}
+	if path := sensitiveRemotePath(layer.AllSettings()); path != "" {
+		return fmt.Errorf("sensitive value %s is not allowed in remote config; use an environment variable", path)
+	}
 	return v.MergeConfigMap(layer.AllSettings())
+}
+
+func sensitiveRemotePath(settings map[string]any) string {
+	var walk func(map[string]any, []string) string
+	walk = func(values map[string]any, prefix []string) string {
+		for key, value := range values {
+			path := append(append([]string{}, prefix...), strings.ToLower(key))
+			if nested, ok := value.(map[string]any); ok {
+				if found := walk(nested, path); found != "" {
+					return found
+				}
+				continue
+			}
+			if isSensitiveConfigPath(path) && fmt.Sprint(value) != "" {
+				return strings.Join(path, ".")
+			}
+		}
+		return ""
+	}
+	return walk(settings, nil)
+}
+
+func isSensitiveConfigPath(path []string) bool {
+	if len(path) >= 3 && path[0] == "database" && path[len(path)-1] == "dsn" {
+		return true
+	}
+	if len(path) != 2 {
+		return false
+	}
+	return (path[0] == "redis" && path[1] == "password") ||
+		(path[0] == "jwt" && path[1] == "secret") ||
+		(path[0] == "registry" && path[1] == "token") ||
+		(path[0] == "notify" && path[1] == "token")
 }

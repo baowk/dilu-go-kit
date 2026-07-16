@@ -50,9 +50,12 @@ internal/{module}/
 
 ## 安全约定
 
-- 密码、token、JWT secret 不写入 YAML 或远程配置，优先用环境变量：`DATABASE_DSN`、`DATABASE_<NAME>_DSN`、`REDIS_PASSWORD`、`JWT_SECRET`、`REGISTRY_TOKEN`。
-- JWT 普通服务只使用 `Secret`；只有在可信网关已剥离外部身份头时才允许 `TrustHeaderUID: true`。
+- 密码、token、JWT secret 不写入 YAML 或远程配置，优先用环境变量：`DATABASE_DSN`、`DATABASE_<NAME>_DSN`、`REDIS_PASSWORD`、`JWT_SECRET`、`REGISTRY_TOKEN`、`NOTIFY_TOKEN`。
+- JWT 必须校验 `exp`，并按服务配置 issuer/audience；分区服务必须从认证上下文读取 `workspace_id`，禁止信任请求参数。
+- 只有在可信网关已剥离外部身份头时才允许 `TrustHeaderUID: true`。
 - gRPC client 默认明文只适合可信内网；跨网络使用 `grpcx.DialOption{TLSConfig: ...}` 或自定义 credentials。
+- gRPC 默认不重试；开启重试必须通过 `RetryMethods` 逐个列出幂等方法。
+- `server/log/database/redis/grpc/registry` 是启动配置，运行时变更必须重启；动态配置用 `OnConfigChange` 校验、`OnConfigApplied` 应用。
 - 对外错误不要返回内部 `err.Error()`；内部错误写日志，对外使用固定文案和 `resp.FailStatus`。
 
 ## 验证
@@ -61,6 +64,7 @@ internal/{module}/
 
 ```bash
 go test ./...
+go test -race ./...
 go vet ./...
 govulncheck ./...
 git diff --check

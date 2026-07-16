@@ -21,7 +21,7 @@ func Recovery() gin.HandlerFunc {
 					"stack", string(debug.Stack()),
 					"path", c.Request.URL.Path,
 				)
-				resp.Fail(c, 50000, "服务内部错误")
+				resp.FailStatus(c, http.StatusInternalServerError, resp.CodeInternal, "服务内部错误")
 				c.Abort()
 			}
 		}()
@@ -43,10 +43,13 @@ func CORSFromConfig(cfg CORSCfg) gin.HandlerFunc {
 	if !cfg.Enable {
 		return func(c *gin.Context) { c.Next() }
 	}
+	if cfg.Mode == "allow-all" {
+		return corsAllowAll()
+	}
 	if cfg.Mode == "whitelist" && len(cfg.Whitelist) > 0 {
 		return corsWhitelist(cfg.Whitelist)
 	}
-	return corsAllowAll()
+	return corsDeny()
 }
 
 // CORSCfg mirrors boot.CORSConfig for mid package use (avoids circular import).
@@ -59,7 +62,7 @@ type CORSCfg struct {
 func corsAllowAll() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Trace-Id,X-Request-Id")
 		c.Header("Access-Control-Expose-Headers", "X-Trace-Id,X-Request-Id")
 		c.Header("Access-Control-Max-Age", "86400")
@@ -78,16 +81,27 @@ func corsWhitelist(allowed []string) gin.HandlerFunc {
 	}
 	return func(c *gin.Context) {
 		origin := c.GetHeader("Origin")
+		c.Header("Vary", "Origin")
 		if set[origin] {
 			c.Header("Access-Control-Allow-Origin", origin)
 			c.Header("Access-Control-Allow-Credentials", "true")
 		}
-		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Trace-Id,X-Request-Id")
 		c.Header("Access-Control-Expose-Headers", "X-Trace-Id,X-Request-Id,refresh-access-token,refresh-exp")
 		c.Header("Access-Control-Max-Age", "86400")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
+func corsDeny() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusForbidden)
 			return
 		}
 		c.Next()

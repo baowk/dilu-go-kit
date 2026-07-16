@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -25,8 +26,8 @@ func TestJWTIgnoresHeaderUIDUnlessExplicitlyTrusted(t *testing.T) {
 
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected business error envelope over HTTP 200, got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected HTTP 401, got %d", w.Code)
 	}
 	if w.Body.String() == "uid=42" {
 		t.Fatalf("HeaderUID was trusted without TrustHeaderUID")
@@ -88,7 +89,10 @@ func TestJWTAcceptsValidHMACToken(t *testing.T) {
 		c.String(http.StatusOK, "uid=%d", GetUID(c))
 	})
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"uid": float64(42)})
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"uid": float64(42),
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
 	tokenStr, err := token.SignedString([]byte("secret"))
 	if err != nil {
 		t.Fatalf("sign token: %v", err)
@@ -114,6 +118,12 @@ func TestJWTExtractsTenantShopAndScopesFromClaims(t *testing.T) {
 		if GetTenantID(c) != 9 {
 			t.Fatalf("tenant_id = %d", GetTenantID(c))
 		}
+		if GetWorkspaceID(c) != 11 {
+			t.Fatalf("workspace_id = %d", GetWorkspaceID(c))
+		}
+		if GetRoleID(c) != 7 {
+			t.Fatalf("role_id = %d", GetRoleID(c))
+		}
 		if !reflect.DeepEqual(GetShopIDs(c), []int64{1, 2, 3}) {
 			t.Fatalf("shop_ids = %#v", GetShopIDs(c))
 		}
@@ -124,10 +134,13 @@ func TestJWTExtractsTenantShopAndScopesFromClaims(t *testing.T) {
 	})
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"uid":       float64(42),
-		"tenant_id": float64(9),
-		"shop_ids":  []any{float64(1), "2", float64(3)},
-		"scopes":    "order.read, order.write",
+		"uid":          float64(42),
+		"tenant_id":    float64(9),
+		"workspace_id": float64(11),
+		"rid":          7,
+		"shop_ids":     []any{float64(1), "2", float64(3)},
+		"scopes":       "order.read, order.write",
+		"exp":          time.Now().Add(time.Hour).Unix(),
 	})
 	tokenStr, err := token.SignedString([]byte("secret"))
 	if err != nil {
@@ -150,12 +163,13 @@ func TestJWTTrustsTenantShopAndScopesHeadersWhenUIDTrusted(t *testing.T) {
 
 	r := gin.New()
 	r.Use(JWT(JWTConfig{
-		Secret:         "secret",
-		HeaderUID:      "x-user-id",
-		HeaderTenantID: "x-tenant-id",
-		HeaderShopIDs:  "x-shop-ids",
-		HeaderScopes:   "x-scopes",
-		TrustHeaderUID: true,
+		Secret:            "secret",
+		HeaderUID:         "x-user-id",
+		HeaderTenantID:    "x-tenant-id",
+		HeaderWorkspaceID: "x-workspace-id",
+		HeaderShopIDs:     "x-shop-ids",
+		HeaderScopes:      "x-scopes",
+		TrustHeaderUID:    true,
 	}))
 	r.GET("/me", func(c *gin.Context) {
 		if GetUID(c) != 42 {
@@ -163,6 +177,9 @@ func TestJWTTrustsTenantShopAndScopesHeadersWhenUIDTrusted(t *testing.T) {
 		}
 		if GetTenantID(c) != 9 {
 			t.Fatalf("tenant_id = %d", GetTenantID(c))
+		}
+		if GetWorkspaceID(c) != 11 {
+			t.Fatalf("workspace_id = %d", GetWorkspaceID(c))
 		}
 		if !reflect.DeepEqual(GetShopIDs(c), []int64{1, 2}) {
 			t.Fatalf("shop_ids = %#v", GetShopIDs(c))
@@ -176,6 +193,7 @@ func TestJWTTrustsTenantShopAndScopesHeadersWhenUIDTrusted(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/me", nil)
 	req.Header.Set("x-user-id", "42")
 	req.Header.Set("x-tenant-id", "9")
+	req.Header.Set("x-workspace-id", "11")
 	req.Header.Set("x-shop-ids", "1,2")
 	req.Header.Set("x-scopes", "order.read,inventory.write")
 	w := httptest.NewRecorder()
@@ -207,6 +225,9 @@ func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
 		if GetTenantID(c) != 0 {
 			t.Fatalf("GetTenantID trusted request header")
 		}
+		if GetWorkspaceID(c) != 0 {
+			t.Fatalf("GetWorkspaceID trusted request header")
+		}
 		if GetShopIDs(c) != nil {
 			t.Fatalf("GetShopIDs trusted request header")
 		}
@@ -222,6 +243,7 @@ func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
 	req.Header.Set("a_nickname", "admin")
 	req.Header.Set("a_mobile", "13800000000")
 	req.Header.Set("x-tenant-id", "9")
+	req.Header.Set("x-workspace-id", "11")
 	req.Header.Set("x-shop-ids", "1,2")
 	req.Header.Set("x-scopes", "order.read")
 	w := httptest.NewRecorder()
@@ -230,5 +252,54 @@ func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
 
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected no content, got %d", w.Code)
+	}
+}
+
+func TestJWTRequiresExpiration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(JWT(JWTConfig{Secret: "secret"}))
+	r.GET("/me", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"uid": 42})
+	tokenStr, err := token.SignedString([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestJWTPreservesInt64Identity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const uid int64 = 9_007_199_254_740_993
+	r := gin.New()
+	r.Use(JWT(JWTConfig{Secret: "secret"}))
+	r.GET("/me", func(c *gin.Context) {
+		if got := GetUID(c); got != uid {
+			t.Fatalf("uid = %d, want %d", got, uid)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"uid": uid,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	tokenStr, err := token.SignedString([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d", w.Code)
 	}
 }

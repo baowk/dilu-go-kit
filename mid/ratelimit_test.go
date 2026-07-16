@@ -3,6 +3,7 @@ package mid
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,19 @@ func TestRateLimiterCloseIsIdempotent(t *testing.T) {
 	limiter := NewRateLimiter(1, time.Millisecond)
 	limiter.Close()
 	limiter.Close()
+}
+
+func TestRateLimiterCloseIsConcurrentSafe(t *testing.T) {
+	limiter := NewRateLimiter(1, time.Millisecond)
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			limiter.Close()
+		}()
+	}
+	wg.Wait()
 }
 
 func TestRateLimitFromConfigFallsBackToMemoryWithoutRedisClient(t *testing.T) {

@@ -65,13 +65,17 @@ import (
 )
 
 mid.Default(a.Gin, mid.DefaultConfig{...})  // 一行注册全部中间件
-auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{Secret: jwtSecret}))
+auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
+    Secret: jwtSecret,
+    Issuer: "auth-service",
+    Audience: []string{"my-service"},
+})) // token 必须包含 exp 和 workspace_id/wid
 uid := mid.GetUID(c)
+workspaceID := mid.GetWorkspaceID(c)
 resp.Ok(c, data)
-resp.Fail(c, resp.CodeUnauthorized, "未登录")
+resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 log.InfoContext(ctx, "msg", "key", val)  // 自动带 trace_id
 notify.Send("env", payload)              // 事件推送
-resp.Fail(c, 40101, "未登录")
 resp.Page(c, list, total, page, size)
 ```
 
@@ -97,16 +101,24 @@ registry:
 ```go
 app, _ := boot.New("resources/config.dev.yaml")
 app.Run(func(a *boot.App) error {
+    cfg := a.GetConfig()
     store.Init(a.DB("main"))
     mid.Default(a.Gin, mid.DefaultConfig{
         CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
-        AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
+        AccessLimit: mid.AccessLimitCfg{
+            Enable: true, Total: 300, Duration: 5,
+            Backend: "redis", Redis: a.Redis, KeyPrefix: "my-service:ratelimit",
+        },
     })
-    notify.Init(a.Config.Notify.WsURL)
-    router.Init(a.Gin)
+    _ = notify.InitConfig(notify.Config{BaseURL: cfg.Notify.WsURL, Token: cfg.Notify.Token})
+    router.Init(a.Gin, mid.JWTConfig{
+        Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer, Audience: cfg.JWT.Audience,
+    })
     return nil
 })
 ```
+
+提交前运行 `go test -race ./...`、`go vet ./...`、`govulncheck ./...` 和 `git diff --check`。
 
 ## 协作偏好
 

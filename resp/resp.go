@@ -47,6 +47,28 @@ func FailStatus(c *gin.Context, httpStatus, code int, msg string) {
 	c.JSON(httpStatus, R{Code: code, Msg: msg})
 }
 
+// HTTPStatusForCode maps standard business-code families to HTTP status codes.
+func HTTPStatusForCode(code int) int {
+	switch code / 100 {
+	case 400:
+		return http.StatusBadRequest
+	case 401:
+		return http.StatusUnauthorized
+	case 403:
+		return http.StatusForbidden
+	case 404:
+		return http.StatusNotFound
+	case 409:
+		return http.StatusConflict
+	case 429:
+		return http.StatusTooManyRequests
+	case 500:
+		return http.StatusInternalServerError
+	default:
+		return http.StatusBadRequest
+	}
+}
+
 // Page sends a paginated success response.
 func Page(c *gin.Context, list any, total int64, page, size int) {
 	if page <= 0 {
@@ -64,7 +86,8 @@ func Page(c *gin.Context, list any, total int64, page, size int) {
 	})
 }
 
-// Error sends a parameter binding error (code 40001).
+// Error sends a safe parameter binding error without exposing internal details.
 func Error(c *gin.Context, err error) {
-	c.JSON(http.StatusOK, R{Code: 40001, Msg: err.Error()})
+	_ = err
+	FailStatus(c, http.StatusBadRequest, CodeInvalidParam, "参数错误")
 }

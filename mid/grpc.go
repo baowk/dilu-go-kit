@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/baowk/dilu-go-kit/log"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 )
@@ -19,8 +20,8 @@ const (
 //	conn, _ := grpc.NewClient(addr, grpc.WithUnaryInterceptor(mid.GRPCUnaryClientInterceptor()))
 func GRPCUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-		if traceID := log.GetTraceID(ctx); traceID != "" {
-			ctx = metadata.AppendToOutgoingContext(ctx, grpcTraceKey, traceID, grpcRequestKey, traceID)
+		if traceID := validTraceID(log.GetTraceID(ctx)); traceID != "" {
+			ctx = setOutgoingTrace(ctx, traceID)
 		}
 		return invoker(ctx, method, req, reply, cc, opts...)
 	}
@@ -29,8 +30,8 @@ func GRPCUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 // GRPCStreamClientInterceptor injects trace_id for outgoing stream calls.
 func GRPCStreamClientInterceptor() grpc.StreamClientInterceptor {
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-		if traceID := log.GetTraceID(ctx); traceID != "" {
-			ctx = metadata.AppendToOutgoingContext(ctx, grpcTraceKey, traceID, grpcRequestKey, traceID)
+		if traceID := validTraceID(log.GetTraceID(ctx)); traceID != "" {
+			ctx = setOutgoingTrace(ctx, traceID)
 		}
 		return streamer(ctx, desc, cc, method, opts...)
 	}
@@ -59,16 +60,28 @@ func GRPCStreamServerInterceptor() grpc.StreamServerInterceptor {
 func extractTraceFromMetadata(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return ctx
+		return log.WithTraceID(ctx, uuid.NewString())
 	}
 	vals := md.Get(grpcTraceKey)
 	if len(vals) == 0 || vals[0] == "" {
 		vals = md.Get(grpcRequestKey)
 	}
-	if len(vals) > 0 && vals[0] != "" {
-		ctx = log.WithTraceID(ctx, vals[0])
+	traceID := ""
+	if len(vals) > 0 {
+		traceID = validTraceID(vals[0])
 	}
-	return ctx
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	return log.WithTraceID(ctx, traceID)
+}
+
+func setOutgoingTrace(ctx context.Context, traceID string) context.Context {
+	md, _ := metadata.FromOutgoingContext(ctx)
+	md = md.Copy()
+	md.Set(grpcTraceKey, traceID)
+	md.Set(grpcRequestKey, traceID)
+	return metadata.NewOutgoingContext(ctx, md)
 }
 
 // wrappedStream overrides Context() to return our enriched context.

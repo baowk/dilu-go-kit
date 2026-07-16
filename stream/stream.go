@@ -24,6 +24,16 @@ type ReaderConfig struct {
 	Block    time.Duration
 }
 
+// ClaimConfig describes recovery of stale pending messages.
+type ClaimConfig struct {
+	Stream   string
+	Group    string
+	Consumer string
+	MinIdle  time.Duration
+	Start    string
+	Count    int64
+}
+
 // Message is a normalized Redis Stream message.
 type Message struct {
 	Stream string
@@ -85,6 +95,31 @@ func ReadGroup(ctx context.Context, rdb redis.Cmdable, cfg ReaderConfig) ([]Mess
 	return normalize(result), nil
 }
 
+// ClaimStale transfers pending messages idle for at least MinIdle to Consumer.
+// Pass the returned cursor back as Start until it returns "0-0".
+func ClaimStale(ctx context.Context, rdb redis.Cmdable, cfg ClaimConfig) ([]Message, string, error) {
+	if cfg.MinIdle <= 0 {
+		return nil, "", errors.New("stream: min idle must be positive")
+	}
+	if cfg.Start == "" {
+		cfg.Start = "0-0"
+	}
+	if cfg.Count <= 0 {
+		cfg.Count = DefaultCount
+	}
+	messages, next, err := rdb.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream: cfg.Stream, Group: cfg.Group, Consumer: cfg.Consumer,
+		MinIdle: cfg.MinIdle, Start: cfg.Start, Count: cfg.Count,
+	}).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, next, nil
+	}
+	if err != nil {
+		return nil, next, err
+	}
+	return normalize([]redis.XStream{{Stream: cfg.Stream, Messages: messages}}), next, nil
+}
+
 // Ack acknowledges messages in a consumer group.
 func Ack(ctx context.Context, rdb redis.Cmdable, stream, group string, ids ...string) error {
 	if len(ids) == 0 {
@@ -95,6 +130,16 @@ func Ack(ctx context.Context, rdb redis.Cmdable, stream, group string, ids ...st
 
 // ToDeadLetter copies a failed message to a dead-letter stream.
 func ToDeadLetter(ctx context.Context, rdb redis.Cmdable, deadStream string, msg Message, extra map[string]any) (string, error) {
+	return addDeadLetter(ctx, rdb, deadStream, msg, extra, false, "")
+}
+
+// DeadLetterAndAck atomically appends to the dead-letter stream and ACKs the
+// source message. In Redis Cluster both stream keys must share a hash slot.
+func DeadLetterAndAck(ctx context.Context, rdb redis.Cmdable, group, deadStream string, msg Message, extra map[string]any) (string, error) {
+	return addDeadLetter(ctx, rdb, deadStream, msg, extra, true, group)
+}
+
+func addDeadLetter(ctx context.Context, rdb redis.Cmdable, deadStream string, msg Message, extra map[string]any, ack bool, group string) (string, error) {
 	values := make(map[string]any, len(msg.Values)+len(extra)+2)
 	for k, v := range msg.Values {
 		values[k] = v
@@ -104,7 +149,22 @@ func ToDeadLetter(ctx context.Context, rdb redis.Cmdable, deadStream string, msg
 	}
 	values["source_stream"] = msg.Stream
 	values["source_id"] = msg.ID
-	return Publish(ctx, rdb, deadStream, values)
+	if !ack {
+		return Publish(ctx, rdb, deadStream, values)
+	}
+	if group == "" || msg.Stream == "" || msg.ID == "" {
+		return "", errors.New("stream: group, source stream, and source ID are required")
+	}
+	var addCmd *redis.StringCmd
+	_, err := rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		addCmd = pipe.XAdd(ctx, &redis.XAddArgs{Stream: deadStream, Values: values})
+		pipe.XAck(ctx, msg.Stream, group, msg.ID)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return addCmd.Val(), nil
 }
 
 func normalize(streams []redis.XStream) []Message {
