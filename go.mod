@@ -1,6 +1,6 @@
 module github.com/baowk/dilu-go-kit
 
-go 1.25.8
+go 1.26.5
 
 require (
 	github.com/gin-gonic/gin v1.12.0

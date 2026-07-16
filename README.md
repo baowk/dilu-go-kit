@@ -18,7 +18,7 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 
 ## 安装
 
-要求 Go 1.25.8 或更高版本。
+要求 Go 1.26.5 或更高版本。
 
 ```bash
 go get github.com/baowk/dilu-go-kit@latest
