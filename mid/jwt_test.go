@@ -1,6 +1,7 @@
 package mid
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -10,6 +11,22 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestClaimInt64RejectsNonPositiveValuesAcrossTypes(t *testing.T) {
+	claims := jwt.MapClaims{
+		"number": json.Number("-1"),
+		"int64":  int64(-2),
+		"int":    -3,
+		"string": "-4",
+		"valid":  json.Number("5"),
+	}
+	if got := claimInt64(claims, "number", "int64", "int", "string", "valid"); got != 5 {
+		t.Fatalf("claimInt64 = %d, want 5", got)
+	}
+	if got := claimInt64Slice(jwt.MapClaims{"ids": []int64{-1, 0, 2}}, "ids"); !reflect.DeepEqual(got, []int64{2}) {
+		t.Fatalf("claimInt64Slice = %#v", got)
+	}
+}
 
 func TestJWTIgnoresHeaderUIDUnlessExplicitlyTrusted(t *testing.T) {
 	gin.SetMode(gin.TestMode)

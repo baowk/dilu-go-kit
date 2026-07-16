@@ -54,6 +54,16 @@ func TestRateLimiterCloseIsConcurrentSafe(t *testing.T) {
 	wg.Wait()
 }
 
+func TestRateLimiterDistributesClientsAcrossShards(t *testing.T) {
+	seen := make(map[uint32]struct{})
+	for _, key := range []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"} {
+		seen[rateLimiterShardIndex(key)] = struct{}{}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("all test clients mapped to one shard: %v", seen)
+	}
+}
+
 func TestRateLimitFromConfigFallsBackToMemoryWithoutRedisClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

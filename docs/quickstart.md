@@ -131,6 +131,10 @@ DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/my_service?sslmode=disable' \
   go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations up
 ```
 
+`create` 生成严格递增的 UnixNano 数字版本。已有迁移历史不要切换到位数更短、数值更小
+的日期格式。多库服务只设置 `DATABASE_<NAME>_DSN`，不要使用会覆盖所有库的
+`DATABASE_DSN`。
+
 ### 4. Model
 
 ```go

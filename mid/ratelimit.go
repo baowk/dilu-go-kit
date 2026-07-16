@@ -17,11 +17,17 @@ import (
 type RateLimiter struct {
 	max       int
 	window    time.Duration
-	mu        sync.Mutex
-	clients   map[string]*rateEntry
+	shards    [rateLimiterShardCount]rateLimiterShard
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
+}
+
+const rateLimiterShardCount = 64
+
+type rateLimiterShard struct {
+	mu      sync.Mutex
+	clients map[string]*rateEntry
 }
 
 type rateEntry struct {
@@ -38,11 +44,13 @@ func NewRateLimiter(max int, window time.Duration) *RateLimiter {
 		window = time.Second
 	}
 	rl := &RateLimiter{
-		max:     max,
-		window:  window,
-		clients: make(map[string]*rateEntry),
-		stop:    make(chan struct{}),
-		done:    make(chan struct{}),
+		max:    max,
+		window: window,
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+	for i := range rl.shards {
+		rl.shards[i].clients = make(map[string]*rateEntry)
 	}
 	go rl.cleanupLoop()
 	return rl
@@ -59,16 +67,17 @@ func RateLimit(max int, window time.Duration) gin.HandlerFunc {
 func (l *RateLimiter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
-		l.mu.Lock()
-		e, ok := l.clients[ip]
+		shard := &l.shards[rateLimiterShardIndex(ip)]
+		shard.mu.Lock()
+		e, ok := shard.clients[ip]
 		now := time.Now()
 		if !ok || now.After(e.resetAt) {
 			e = &rateEntry{count: 0, resetAt: now.Add(l.window)}
-			l.clients[ip] = e
+			shard.clients[ip] = e
 		}
 		e.count++
 		over := e.count > l.max
-		l.mu.Unlock()
+		shard.mu.Unlock()
 
 		if over {
 			resp.FailStatus(c, 429, 42901, "请求过于频繁")
@@ -91,7 +100,11 @@ func (l *RateLimiter) Close() {
 }
 
 func (l *RateLimiter) cleanupLoop() {
-	ticker := time.NewTicker(l.window)
+	interval := l.window
+	if interval < 30*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer func() {
 		ticker.Stop()
 		close(l.done)
@@ -108,14 +121,28 @@ func (l *RateLimiter) cleanupLoop() {
 }
 
 func (l *RateLimiter) cleanupExpired() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
 	now := time.Now()
-	for k, e := range l.clients {
-		if now.After(e.resetAt) {
-			delete(l.clients, k)
+	for i := range l.shards {
+		shard := &l.shards[i]
+		shard.mu.Lock()
+		for k, e := range shard.clients {
+			if now.After(e.resetAt) {
+				delete(shard.clients, k)
+			}
 		}
+		shard.mu.Unlock()
 	}
+}
+
+func rateLimiterShardIndex(key string) uint32 {
+	const offset32 = uint32(2166136261)
+	const prime32 = uint32(16777619)
+	hash := offset32
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= prime32
+	}
+	return hash & (rateLimiterShardCount - 1)
 }
 
 // RedisRateLimiter is a fixed-window distributed rate limiter backed by Redis.

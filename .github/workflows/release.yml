@@ -18,6 +18,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - run: go mod verify
+      - run: test -z "$(gofmt -l .)"
+      - name: Check whitespace
+        run: |
+          git diff --check
+          git diff --check "$(git hash-object -t tree /dev/null)" HEAD
+      - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.2.0

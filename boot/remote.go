@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/baowk/dilu-go-kit/log"
@@ -96,12 +97,18 @@ func WatchRemoteConfigTree(ctx context.Context, reg RegistryConfig, serviceName 
 	}
 
 	watchCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	var watchers sync.WaitGroup
+	defer func() {
+		cancel()
+		watchers.Wait()
+	}()
 
 	errCh := make(chan error, len(keys))
 	for _, key := range keys {
 		key := key
+		watchers.Add(1)
 		go func() {
+			defer watchers.Done()
 			errCh <- watchRemoteConfigKey(watchCtx, reg, key, func([]byte) {
 				onChange()
 			})

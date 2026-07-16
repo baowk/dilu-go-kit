@@ -14,6 +14,7 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 - **migratex** — PostgreSQL SQL 迁移封装（up/down/version/force/create）
 - **registry** — 服务注册与发现（etcd / consul）
 - **notify** — 通用 HTTP 事件推送（支持 traceId 透传）
+- **metrics** — Prometheus HTTP/gRPC 指标（支持运行时服务名）
 
 ## 安装
 
@@ -29,28 +30,45 @@ go get github.com/baowk/dilu-go-kit@latest
 package main
 
 import (
+    "log"
+    "net/http"
+
     "github.com/baowk/dilu-go-kit/boot"
-    "github.com/baowk/dilu-go-kit/log"
+    kitlog "github.com/baowk/dilu-go-kit/log"
+    "github.com/baowk/dilu-go-kit/metrics"
     "github.com/baowk/dilu-go-kit/mid"
     "github.com/baowk/dilu-go-kit/resp"
     "github.com/gin-gonic/gin"
 )
 
 func main() {
-    app, _ := boot.New("config.yaml")
-    app.Run(func(a *boot.App) error {
+    app, err := boot.New("config.yaml")
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := app.Run(func(a *boot.App) error {
+        cfg := a.GetConfig()
+        metrics.Init(cfg.Server.Name)
+        a.Gin.Use(metrics.GinMiddleware())
+
         // 一行注册全部中间件（Trace + Recovery + ErrorHandler + Logger + CORS + RateLimit）
         mid.Default(a.Gin, mid.DefaultConfig{
             CORS:        mid.CORSCfg{Enable: true, Mode: "allow-all"},
             AccessLimit: mid.AccessLimitCfg{Enable: true, Total: 300, Duration: 5},
         })
 
+        a.Gin.GET("/health", func(c *gin.Context) {
+            c.JSON(http.StatusOK, gin.H{"status": "ok"})
+        })
+        a.Gin.GET("/metrics", metrics.Handler())
         a.Gin.GET("/ping", func(c *gin.Context) {
-            log.InfoContext(c.Request.Context(), "ping", "ip", c.ClientIP())
+            kitlog.InfoContext(c.Request.Context(), "ping", "ip", c.ClientIP())
             resp.Ok(c, "pong")
         })
         return nil
-    })
+    }); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -69,6 +87,7 @@ clientx/    服务客户端重试、熔断、错误码映射
 migratex/   PostgreSQL SQL 迁移封装
 registry/   服务注册与发现（etcd / consul）
 notify/     通用事件推送
+metrics/    Prometheus HTTP/gRPC 指标
 example/    完整示例服务
 docs/       规范文档
 ```
@@ -189,6 +208,25 @@ resp.Fail(c, resp.CodeConflict, "冲突") // 兼容旧协议：HTTP 200 + 业务
 resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 ```
 
+统一响应固定包含 `code` 和 `msg`。`data` 使用 `omitempty`，无数据时字段不存在；
+客户端应把它作为可选字段处理。
+
+## 指标与健康检查
+
+```go
+metrics.Init(cfg.Server.Name)
+r.Use(metrics.GinMiddleware())
+r.GET("/health", func(c *gin.Context) {
+    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+})
+r.GET("/metrics", metrics.Handler())
+```
+
+`boot.New` 会用 `server.name` 初始化服务名，并自动给 boot 创建的 gRPC server 挂载指标。
+独立使用 metrics 包时，`metrics.Init` 可在中间件构造前后调用，也可再次调用；后续观测
+使用最新服务名。
+`/health` 和 `/metrics` 应位于 JWT 业务路由之外，并通过网络策略限制指标端点访问。
+
 ## 事件通知
 
 ```go
@@ -236,8 +274,8 @@ for _, msg := range msgs {
 ```text
 services/order-service/
   migrations/
-    20260709120000_init.up.sql
-    20260709120000_init.down.sql
+    <version>_init.up.sql
+    <version>_init.down.sql
 ```
 
 ```bash
@@ -245,6 +283,9 @@ go run github.com/baowk/dilu-go-kit/cmd/migrate -dir services/order-service/migr
 DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
   go run github.com/baowk/dilu-go-kit/cmd/migrate -dir services/order-service/migrations up
 ```
+
+迁移版本是严格递增的十进制整数。`migrate create` 使用 UTC UnixNano，并保证同一进程内
+并发创建时唯一递增。已有历史可能使用日期格式版本；不要切换到位数更短、数值更小的格式。
 
 ## 服务注册与发现
 
@@ -326,6 +367,10 @@ NOTIFY_WS_URL='http://mf-ws:9020'
 NOTIFY_TOKEN='...'
 REMOTE_NODE='node-1'
 ```
+
+`DATABASE_DSN` 会覆盖所有 `database.*.dsn`，只适合单库或所有库共用同一 DSN。
+多库服务不要设置它，应使用 `DATABASE_<NAME>_DSN`（如 `DATABASE_MAIN_DSN`、
+`DATABASE_AUDIT_DSN`）逐库注入。
 
 ## 配置示例
 

@@ -177,15 +177,21 @@ func claimInt64(claims jwt.MapClaims, keys ...string) int64 {
 				return int64(v)
 			}
 		case json.Number:
-			n, _ := v.Int64()
-			return n
+			if n, err := v.Int64(); err == nil && n > 0 {
+				return n
+			}
 		case int64:
-			return v
+			if v > 0 {
+				return v
+			}
 		case int:
-			return int64(v)
+			if v > 0 {
+				return int64(v)
+			}
 		case string:
-			n, _ := strconv.ParseInt(v, 10, 64)
-			return n
+			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+				return n
+			}
 		}
 	}
 	return 0
@@ -224,7 +230,13 @@ func claimInt64Slice(claims jwt.MapClaims, keys ...string) []int64 {
 			}
 			return out
 		case []int64:
-			return v
+			out := make([]int64, 0, len(v))
+			for _, n := range v {
+				if n > 0 {
+					out = append(out, n)
+				}
+			}
+			return out
 		case string:
 			return parseInt64CSV(v)
 		}

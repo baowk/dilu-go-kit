@@ -57,8 +57,9 @@ func TestTransportCredentialsTLS(t *testing.T) {
 
 func TestRetryServiceConfigCanDisableRetries(t *testing.T) {
 	opt := normalizeDialOption(DialOption{RetryMaxAttempts: 1})
-	if got := opt.retryServiceConfig(); got != `{"methodConfig":[]}` {
-		t.Fatalf("retry config = %s", got)
+	got, err := opt.retryServiceConfigValidated()
+	if err != nil || got != `{"methodConfig":[]}` {
+		t.Fatalf("retry config = %s, err = %v", got, err)
 	}
 }
 

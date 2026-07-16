@@ -42,10 +42,10 @@ my-service/
 
 ```text
 migrations/
-  20260709120000_init.up.sql
-  20260709120000_init.down.sql
-  20260709121000_add_order_status.up.sql
-  20260709121000_add_order_status.down.sql
+  <version>_init.up.sql
+  <version>_init.down.sql
+  <version>_add_order_status.up.sql
+  <version>_add_order_status.down.sql
 ```
 
 命令：
@@ -55,6 +55,9 @@ go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations create -name ini
 DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
   go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations up
 ```
+
+版本前缀是严格递增的十进制整数。`migrate create` 使用 UTC UnixNano，并保证同一进程内
+并发创建时唯一递增。已有迁移历史不得切换到数值更小的短格式。
 
 规则：
 - 所有 DDL 通过 migration 进入仓库，不允许只依赖 GORM AutoMigrate。
@@ -162,6 +165,8 @@ func S() *Stores { ... }        // 获取全局实例
 {"code": 200, "msg": "OK", "data": {"list": [], "total": 100, "pageSize": 20, "currentPage": 1}}
 ```
 
+`code` 和 `msg` 始终存在；`data` 为可选字段，无数据时不输出。
+
 ### 错误码
 
 ```
@@ -174,6 +179,19 @@ func S() *Stores { ... }        // 获取全局实例
 429xx     限流（42901 请求过于频繁）
 500xx     服务端错误（50001 数据库错误、50002 外部服务不可用）
 ```
+
+### 指标与健康检查
+
+`boot.New` 使用 `server.name` 初始化 Prometheus 服务标签，并自动给 boot 创建的 gRPC
+server 挂载指标。HTTP 服务显式注册中间件和匿名运维端点：
+
+```go
+r.Use(metrics.GinMiddleware())
+r.GET("/health", healthHandler)
+r.GET("/metrics", metrics.Handler())
+```
+
+`/health`、`/metrics` 不放入 JWT 业务路由组；生产环境通过网关或网络策略限制访问。
 
 ### 分页参数
 
@@ -529,3 +547,6 @@ YAML 内联敏感值，远程配置在所有模式都会拒绝 DSN/password/secr
 | `SERVER_ADDR` / `SERVER_ADVERTISE_ADDR` | `server.addr/advertiseAddr` |
 | `GRPC_ADDR` / `GRPC_ADVERTISE_ADDR` | `grpc.addr/advertiseAddr` |
 | `REMOTE_NODE` | `registry.configNode` |
+
+`DATABASE_DSN` 会覆盖所有数据库。多库服务不要设置它，应只使用
+`DATABASE_<NAME>_DSN` 逐库注入。

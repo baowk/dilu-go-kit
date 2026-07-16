@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/log"
+	"github.com/baowk/dilu-go-kit/metrics"
 	"github.com/baowk/dilu-go-kit/mid"
 	"github.com/baowk/dilu-go-kit/registry"
 	"github.com/gin-gonic/gin"
@@ -100,6 +101,7 @@ func New(cfgPath string) (*App, error) {
 	}
 
 	log.Init(cfg.Server.Mode, cfg.Server.Name, cfg.Log.Output, &cfg.Log.File)
+	metrics.Init(cfg.Server.Name)
 
 	if cfg.Server.Mode == "release" {
 		gin.SetMode(gin.ReleaseMode)
@@ -134,12 +136,18 @@ func New(cfgPath string) (*App, error) {
 	}
 
 	if cfg.GRPC.Enable {
-		// gRPC server with traceId interceptors
+		// gRPC server with trace propagation and metrics interceptors.
 		app.GRPC = grpc.NewServer(
 			grpc.MaxRecvMsgSize(defaultInt(cfg.GRPC.MaxRecvMsgSize, 4<<20)),
 			grpc.MaxSendMsgSize(defaultInt(cfg.GRPC.MaxSendMsgSize, 4<<20)),
-			grpc.UnaryInterceptor(mid.GRPCUnaryServerInterceptor()),
-			grpc.StreamInterceptor(mid.GRPCStreamServerInterceptor()),
+			grpc.ChainUnaryInterceptor(
+				mid.GRPCUnaryServerInterceptor(),
+				metrics.GRPCUnaryServerInterceptor(),
+			),
+			grpc.ChainStreamInterceptor(
+				mid.GRPCStreamServerInterceptor(),
+				metrics.GRPCStreamServerInterceptor(),
+			),
 		)
 	}
 

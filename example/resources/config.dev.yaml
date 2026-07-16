@@ -50,6 +50,10 @@ accessLimit:
   backend: redis
   keyPrefix: "demo-service:ratelimit"
 
+# notify:
+#   wsUrl: "http://mf-ws:9020"
+#   token: "" # use NOTIFY_TOKEN
+
 grpc:
   enable: false
   # addr: ":9090"

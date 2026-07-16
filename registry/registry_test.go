@@ -52,6 +52,13 @@ func TestConsulRefreshIntervalNeverZero(t *testing.T) {
 	}
 }
 
+func TestConsulConfigAppliesExplicitToken(t *testing.T) {
+	cfg := consulConfig("127.0.0.1:8500", "explicit-token")
+	if cfg.Address != "127.0.0.1:8500" || cfg.Token != "explicit-token" {
+		t.Fatalf("consul config = address %q token %q", cfg.Address, cfg.Token)
+	}
+}
+
 func TestConfig_ttl(t *testing.T) {
 	c1 := Config{}
 	if c1.ttl() != 30 {

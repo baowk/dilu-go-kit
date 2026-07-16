@@ -100,7 +100,7 @@ func (s *slogLogger) ErrorContext(ctx context.Context, msg string, args ...any) 
 }
 
 func (s *slogLogger) With(args ...any) Logger {
-	return &slogLogger{l: s.l.With(args...)}
+	return &slogLogger{l: s.l.With(args...), closer: s.closer}
 }
 
 // ── traceHandler: injects trace_id from context into every log record ──

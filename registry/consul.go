@@ -32,23 +32,21 @@ func NewConsul(cfg Config) (Registry, error) {
 		return nil, fmt.Errorf("registry: no consul address configured")
 	}
 
-	consulCfg := consul.DefaultConfig()
-	consulCfg.Address = addr
-	if cfg.Token != "" {
-		consulCfg.Token = cfg.Token
-	}
-
-	client, err := consul.NewClient(consulCfg)
+	probeCfg := consulConfig(addr, cfg.Token)
+	probe, err := consul.NewClient(probeCfg)
 	if err != nil {
 		return nil, fmt.Errorf("registry: consul client: %w", err)
 	}
-
-	// Limit the startup probe without imposing that timeout on blocking watches.
-	consulCfg.HttpClient.Timeout = cfg.dialTimeout()
-	_, err = client.Agent().Self()
-	consulCfg.HttpClient.Timeout = 0
+	probeCfg.HttpClient.Timeout = cfg.dialTimeout()
+	_, err = probe.Agent().Self()
+	probeCfg.HttpClient.CloseIdleConnections()
 	if err != nil {
 		return nil, fmt.Errorf("registry: consul connect: %w", err)
+	}
+
+	client, err := consul.NewClient(consulConfig(addr, cfg.Token))
+	if err != nil {
+		return nil, fmt.Errorf("registry: consul client: %w", err)
 	}
 
 	return &consulRegistry{
@@ -57,6 +55,15 @@ func NewConsul(cfg Config) (Registry, error) {
 		checks:  make(map[string]string),
 		cancels: make(map[string]context.CancelFunc),
 	}, nil
+}
+
+func consulConfig(addr, token string) *consul.Config {
+	cfg := consul.DefaultConfig()
+	cfg.Address = addr
+	if token != "" {
+		cfg.Token = token
+	}
+	return cfg
 }
 
 func (r *consulRegistry) Register(ctx context.Context, svc Service) error {

@@ -165,11 +165,6 @@ func (o DialOption) transportCredentials() credentials.TransportCredentials {
 	return insecure.NewCredentials()
 }
 
-func (o DialOption) retryServiceConfig() string {
-	config, _ := o.retryServiceConfigValidated()
-	return config
-}
-
 func (o DialOption) retryServiceConfigValidated() (string, error) {
 	if o.RetryMaxAttempts <= 1 {
 		return `{"methodConfig":[]}`, nil

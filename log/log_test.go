@@ -2,11 +2,17 @@ package log
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"sync"
 	"testing"
 )
 
 type noopLogger struct{}
+
+type testCloser struct{}
+
+func (*testCloser) Close() error { return nil }
 
 func (noopLogger) Debug(string, ...any)                         {}
 func (noopLogger) Info(string, ...any)                          {}
@@ -37,4 +43,13 @@ func TestConcurrentLoggingAndLoggerSwap(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSlogLoggerWithPreservesCloser(t *testing.T) {
+	closer := &testCloser{}
+	parent := &slogLogger{l: slog.New(slog.NewTextHandler(io.Discard, nil)), closer: closer}
+	child, ok := parent.With("key", "value").(*slogLogger)
+	if !ok || child.closer != closer {
+		t.Fatal("derived logger did not preserve the output closer")
+	}
 }
