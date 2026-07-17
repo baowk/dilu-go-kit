@@ -32,12 +32,14 @@ func NewConsul(cfg Config) (Registry, error) {
 		return nil, fmt.Errorf("registry: no consul address configured")
 	}
 
-	probeCfg := consulConfig(addr, cfg.Token)
+	probeCfg, err := consulProbeConfig(addr, cfg.Token, cfg.dialTimeout())
+	if err != nil {
+		return nil, fmt.Errorf("registry: consul probe client: %w", err)
+	}
 	probe, err := consul.NewClient(probeCfg)
 	if err != nil {
 		return nil, fmt.Errorf("registry: consul client: %w", err)
 	}
-	probeCfg.HttpClient.Timeout = cfg.dialTimeout()
 	_, err = probe.Agent().Self()
 	probeCfg.HttpClient.CloseIdleConnections()
 	if err != nil {
@@ -64,6 +66,17 @@ func consulConfig(addr, token string) *consul.Config {
 		cfg.Token = token
 	}
 	return cfg
+}
+
+func consulProbeConfig(addr, token string, timeout time.Duration) (*consul.Config, error) {
+	cfg := consulConfig(addr, token)
+	httpClient, err := consul.NewHttpClient(cfg.Transport, cfg.TLSConfig)
+	if err != nil {
+		return nil, err
+	}
+	httpClient.Timeout = timeout
+	cfg.HttpClient = httpClient
+	return cfg, nil
 }
 
 func (r *consulRegistry) Register(ctx context.Context, svc Service) error {

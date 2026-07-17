@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	consul "github.com/hashicorp/consul/api"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
@@ -56,6 +57,22 @@ func TestConsulConfigAppliesExplicitToken(t *testing.T) {
 	cfg := consulConfig("127.0.0.1:8500", "explicit-token")
 	if cfg.Address != "127.0.0.1:8500" || cfg.Token != "explicit-token" {
 		t.Fatalf("consul config = address %q token %q", cfg.Address, cfg.Token)
+	}
+}
+
+func TestConsulProbeConfigSetsTimeoutBeforeClientCreation(t *testing.T) {
+	cfg, err := consulProbeConfig("127.0.0.1:8500", "", 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HttpClient == nil || cfg.HttpClient.Timeout != 2*time.Second {
+		t.Fatalf("probe HTTP client = %#v", cfg.HttpClient)
+	}
+	if _, err := consul.NewClient(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HttpClient.Timeout != 2*time.Second {
+		t.Fatalf("NewClient replaced probe timeout: %s", cfg.HttpClient.Timeout)
 	}
 }
 

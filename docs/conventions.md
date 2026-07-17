@@ -83,7 +83,7 @@ AI 生成或补充代码时必须按“表/资源”为最小文件边界，避�
 - 禁止创建或扩写 `store/pg.go`、`store/store_pg.go`、`store/repository.go` 来集中放多个表的查询实现。
 - 禁止创建或扩写 `service/service.go`、`service/dto/dto.go`、`apis/apis.go` 来集中放多个资源的业务逻辑、DTO 或 handler。
 - 禁止把多个表的 CRUD 混在一个 store struct 里；每张表一个 `XxxStore` 接口和一个 `pgXxxStore` 实现。
-- 单文件超过约 300 行时必须优先拆分到按表/按职责文件，而不是继续追加。
+- 单文件超过约 800 行时必须优先拆分到按表/按职责文件，而不是继续追加。
 
 ### Model
 

@@ -211,10 +211,7 @@ func TestMergeConfigLayersRebuildsFromLocalBase(t *testing.T) {
 		Redis:  RedisConfig{Addr: "local-redis:6379"},
 	}
 
-	first, err := cloneConfig(base)
-	if err != nil {
-		t.Fatal(err)
-	}
+	first := cloneConfig(base)
 	if err := mergeConfigLayers(first, "yaml",
 		[]byte("server:\n  name: remote\nredis:\n  addr: remote-redis:6379\n"),
 		[]byte("server:\n  addr: \":9090\"\n"),
@@ -225,10 +222,7 @@ func TestMergeConfigLayersRebuildsFromLocalBase(t *testing.T) {
 		t.Fatalf("first merge redis = %q", first.Redis.Addr)
 	}
 
-	second, err := cloneConfig(base)
-	if err != nil {
-		t.Fatal(err)
-	}
+	second := cloneConfig(base)
 	if err := mergeConfigLayers(second, "yaml",
 		[]byte("server:\n  name: remote2\n"),
 		[]byte("server:\n  addr: \":9091\"\n"),

@@ -3,6 +3,8 @@ package boot
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -114,4 +116,143 @@ func TestEnvName(t *testing.T) {
 	if got := envName("analytics-db"); got != "ANALYTICS_DB" {
 		t.Fatalf("envName = %q", got)
 	}
+}
+
+func TestCloneConfigDeepCopiesMutableFields(t *testing.T) {
+	trueValue := true
+	falseValue := false
+	original := &Config{
+		Server:   ServerConfig{TrustedProxies: []string{"10.0.0.0/8"}},
+		JWT:      JWTConfig{Audience: []string{"api"}},
+		CORS:     CORSConfig{Whitelist: []string{"https://example.com"}},
+		Registry: RegistryConfig{Endpoints: []string{"127.0.0.1:2379"}},
+		Database: map[string]DatabaseConfig{
+			"main": {PingOnOpen: &trueValue, PrepareStmt: &falseValue},
+		},
+	}
+
+	cloned := cloneConfig(original)
+	if !reflect.DeepEqual(original, cloned) {
+		t.Fatalf("clone value differs\noriginal: %#v\nclone: %#v", original, cloned)
+	}
+	assertMutableValuesIndependent(t, reflect.ValueOf(original).Elem(), reflect.ValueOf(cloned).Elem(), "Config")
+}
+
+func TestCloneConfigMutableFieldGuard(t *testing.T) {
+	want := []string{
+		"Config.CORS.Whitelist",
+		"Config.Database",
+		"Config.Database{}.PingOnOpen",
+		"Config.Database{}.PrepareStmt",
+		"Config.JWT.Audience",
+		"Config.Registry.Endpoints",
+		"Config.Server.TrustedProxies",
+	}
+	var got []string
+	collectMutableFieldPaths(reflect.TypeOf(Config{}), "Config", make(map[reflect.Type]bool), &got)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("mutable Config fields changed; update cloneConfig and its fixture\nwant: %v\ngot:  %v", want, got)
+	}
+}
+
+func TestCloneConfigNil(t *testing.T) {
+	if cloneConfig(nil) != nil {
+		t.Fatal("cloneConfig(nil) must return nil")
+	}
+}
+
+func collectMutableFieldPaths(typ reflect.Type, path string, visiting map[reflect.Type]bool, paths *[]string) {
+	switch typ.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map:
+		*paths = append(*paths, path)
+		nextPath := path
+		if typ.Kind() == reflect.Map {
+			nextPath += "{}"
+		} else if typ.Kind() == reflect.Slice {
+			nextPath += "[]"
+		}
+		collectMutableFieldPaths(typ.Elem(), nextPath, visiting, paths)
+	case reflect.Struct:
+		if visiting[typ] {
+			return
+		}
+		visiting[typ] = true
+		defer delete(visiting, typ)
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			if field.PkgPath == "" {
+				collectMutableFieldPaths(field.Type, path+"."+field.Name, visiting, paths)
+			}
+		}
+	}
+}
+
+func assertMutableValuesIndependent(t *testing.T, original, cloned reflect.Value, path string) {
+	t.Helper()
+	switch original.Kind() {
+	case reflect.Struct:
+		for i := 0; i < original.NumField(); i++ {
+			field := original.Type().Field(i)
+			if field.PkgPath == "" && containsMutableField(field.Type) {
+				assertMutableValuesIndependent(t, original.Field(i), cloned.Field(i), path+"."+field.Name)
+			}
+		}
+	case reflect.Pointer:
+		assertNonNilAndDistinct(t, original, cloned, path)
+		if containsMutableField(original.Type().Elem()) {
+			assertMutableValuesIndependent(t, original.Elem(), cloned.Elem(), path)
+		}
+	case reflect.Slice:
+		assertNonNilAndDistinct(t, original, cloned, path)
+		if original.Len() == 0 {
+			t.Fatalf("%s fixture must be non-empty", path)
+		}
+		for i := 0; i < original.Len() && containsMutableField(original.Type().Elem()); i++ {
+			assertMutableValuesIndependent(t, original.Index(i), cloned.Index(i), path+"[]")
+		}
+	case reflect.Map:
+		assertNonNilAndDistinct(t, original, cloned, path)
+		if original.Len() == 0 {
+			t.Fatalf("%s fixture must be non-empty", path)
+		}
+		if containsMutableField(original.Type().Elem()) {
+			iter := original.MapRange()
+			for iter.Next() {
+				cloneValue := cloned.MapIndex(iter.Key())
+				if !cloneValue.IsValid() {
+					t.Fatalf("%s clone is missing map key %v", path, iter.Key())
+				}
+				assertMutableValuesIndependent(t, iter.Value(), cloneValue, path+"{}")
+			}
+		}
+	}
+}
+
+func assertNonNilAndDistinct(t *testing.T, original, cloned reflect.Value, path string) {
+	t.Helper()
+	if original.IsNil() {
+		t.Fatalf("%s fixture must be non-nil", path)
+	}
+	if cloned.IsNil() {
+		t.Fatalf("%s was not cloned", path)
+	}
+	if original.Pointer() == cloned.Pointer() {
+		t.Fatalf("%s shares mutable storage with its clone", path)
+	}
+}
+
+func containsMutableField(typ reflect.Type) bool {
+	switch typ.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Map:
+		return true
+	case reflect.Struct:
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			if field.PkgPath == "" && containsMutableField(field.Type) {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -46,6 +46,7 @@ AI 写代码时必须按表/资源拆文件，避免生成巨大的 `model.go` /
 - 禁止把多个资源的业务逻辑、DTO、handler 集中写进 `service/service.go`、`service/dto/dto.go` 或 `apis/apis.go`
 - 禁止在代码中硬编码 Redis key
 - 分区表查询必须带分区键
+- 单文件超过约 800 行时优先按表、资源或职责拆分
 
 ## API 规范
 

@@ -45,10 +45,7 @@ func TestRunReturnsWhenHTTPPortCannotBind(t *testing.T) {
 
 func TestValidateRuntimeConfigRejectsStartupFields(t *testing.T) {
 	current := &Config{Server: ServerConfig{Name: "test", Addr: ":8080"}}
-	next, err := cloneConfig(current)
-	if err != nil {
-		t.Fatal(err)
-	}
+	next := cloneConfig(current)
 	next.Server.Addr = ":9090"
 	if err := validateRuntimeConfigChange(current, next); err == nil {
 		t.Fatal("expected startup field change to be rejected")

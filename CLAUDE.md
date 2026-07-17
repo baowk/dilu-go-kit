@@ -46,7 +46,7 @@ internal/{module}/
 - 禁止集中创建 `model/model.go`、`store/store_pg.go`、`service/service.go`、`service/dto/dto.go`、`apis/apis.go`。
 - 禁止 service 层直接使用 `gorm.DB`，只能通过 store 接口。
 - 分区表查询必须带分区键，如 `workspace_id`。
-- 单文件超过约 300 行时优先按表/资源/职责拆分。
+- 单文件超过约 800 行时优先按表/资源/职责拆分。
 
 ## 安全约定
 

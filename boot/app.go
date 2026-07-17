@@ -60,12 +60,7 @@ type App struct {
 func (a *App) GetConfig() *Config {
 	a.cfgMu.RLock()
 	defer a.cfgMu.RUnlock()
-	cloned, err := cloneConfig(a.Config)
-	if err != nil {
-		copy := *a.Config
-		return &copy
-	}
-	return cloned
+	return cloneConfig(a.Config)
 }
 
 // swapConfig replaces the config under lock.
@@ -84,10 +79,7 @@ func New(cfgPath string) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	localCfg, err := cloneConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
+	localCfg := cloneConfig(cfg)
 
 	// Merge remote config from registry backend if configKey is set
 	if cfg.Registry.ConfigKey != "" && (len(cfg.Registry.Endpoints) > 0 || cfg.Registry.Address != "") {
@@ -471,11 +463,7 @@ func (a *App) watchRemoteConfig(ctx context.Context) {
 		if base == nil {
 			base = a.GetConfig()
 		}
-		newCfg, err := cloneConfig(base)
-		if err != nil {
-			log.Error("remote config: failed to clone local base", "error", err)
-			return
-		}
+		newCfg := cloneConfig(base)
 		if err := MergeRemoteConfigOptional(reg, serviceName, newCfg); err != nil {
 			log.Error("remote config: failed to merge update", "error", err)
 			return
@@ -495,11 +483,7 @@ func (a *App) watchRemoteConfig(ctx context.Context) {
 			}
 		}
 
-		published, err := cloneConfig(newCfg)
-		if err != nil {
-			log.Error("remote config: failed to publish immutable snapshot", "error", err)
-			return
-		}
+		published := cloneConfig(newCfg)
 		a.swapConfig(published)
 		for _, fn := range appliedCallbacks {
 			if err := callConfigApplied(fn, a.GetConfig()); err != nil {

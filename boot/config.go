@@ -3,7 +3,6 @@
 package boot
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -320,17 +319,37 @@ func envName(name string) string {
 	return strings.Trim(b.String(), "_")
 }
 
-func cloneConfig(cfg *Config) (*Config, error) {
+func cloneConfig(cfg *Config) *Config {
 	if cfg == nil {
-		return nil, nil
+		return nil
 	}
-	buf, err := json.Marshal(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("clone config marshal: %w", err)
+	cloned := *cfg
+	cloned.Server.TrustedProxies = cloneStrings(cfg.Server.TrustedProxies)
+	cloned.JWT.Audience = cloneStrings(cfg.JWT.Audience)
+	cloned.CORS.Whitelist = cloneStrings(cfg.CORS.Whitelist)
+	cloned.Registry.Endpoints = cloneStrings(cfg.Registry.Endpoints)
+	if cfg.Database != nil {
+		cloned.Database = make(map[string]DatabaseConfig, len(cfg.Database))
+		for name, db := range cfg.Database {
+			db.PingOnOpen = cloneBool(db.PingOnOpen)
+			db.PrepareStmt = cloneBool(db.PrepareStmt)
+			cloned.Database[name] = db
+		}
 	}
-	var cloned Config
-	if err := json.Unmarshal(buf, &cloned); err != nil {
-		return nil, fmt.Errorf("clone config unmarshal: %w", err)
+	return &cloned
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
 	}
-	return &cloned, nil
+	return append(make([]string, 0, len(values)), values...)
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
