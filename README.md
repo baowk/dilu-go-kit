@@ -243,29 +243,23 @@ notify.SendContext(ctx, "proxy", payload)  // 自动携带 traceId
 ```go
 import "github.com/baowk/dilu-go-kit/stream"
 
-_ = stream.EnsureGroup(ctx, app.Redis, "sync.tasks", "sync-worker", "0")
-
 id, err := stream.Publish(ctx, app.Redis, "sync.tasks", map[string]any{
     "task_id": "123",
     "type": "order_pull",
 })
 
-msgs, err := stream.ReadGroup(ctx, app.Redis, stream.ReaderConfig{
-    Stream: "sync.tasks",
-    Group: "sync-worker",
-    Consumer: "worker-1",
+err = stream.RunGroupConsumer(ctx, app.Redis, stream.GroupConsumerConfig{
+    Name: "sync-worker.tasks", Stream: "sync.tasks",
+    Group: "sync-worker", Consumer: "worker-1",
+}, func(ctx context.Context, msgs []stream.Message) {
+    for _, msg := range msgs {
+        // handle message idempotently before ACK
+        _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
+    }
 })
-stale, next, err := stream.ClaimStale(ctx, app.Redis, stream.ClaimConfig{
-    Stream: "sync.tasks", Group: "sync-worker", Consumer: "worker-1",
-    MinIdle: time.Minute, Start: "0-0",
-})
-_ = stale
-_ = next
-for _, msg := range msgs {
-    // handle message idempotently
-    _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
-}
 ```
+
+`RunGroupConsumer` 会创建消费组，统一处理新消息和 stale pending 消息，并在 Redis 故障时执行带抖动的指数退避、错误聚合和恢复日志。`ReadGroup`、`ClaimStale` 保持一次性原语语义，仅在调用方需要自行编排循环时使用。
 
 ## 数据库迁移
 

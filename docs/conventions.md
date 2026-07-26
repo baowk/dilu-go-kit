@@ -326,29 +326,23 @@ err := notify.SendContextE(ctx, "proxy", payload) // 关键通知必须处理错
 ```go
 import "github.com/baowk/dilu-go-kit/stream"
 
-_ = stream.EnsureGroup(ctx, app.Redis, "sync.tasks", "sync-worker", "0")
-
 _, err := stream.Publish(ctx, app.Redis, "sync.tasks", map[string]any{
     "task_id": "123",
     "type": "order_pull",
 })
 
-msgs, err := stream.ReadGroup(ctx, app.Redis, stream.ReaderConfig{
-    Stream:   "sync.tasks",
-    Group:    "sync-worker",
-    Consumer: "worker-1",
+err = stream.RunGroupConsumer(ctx, app.Redis, stream.GroupConsumerConfig{
+    Name: "sync-worker.tasks", Stream: "sync.tasks",
+    Group: "sync-worker", Consumer: "worker-1",
+}, func(ctx context.Context, msgs []stream.Message) {
+    for _, msg := range msgs {
+        // 消费端必须先检查业务幂等键，再 ACK
+        _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
+    }
 })
-stale, next, err := stream.ClaimStale(ctx, app.Redis, stream.ClaimConfig{
-    Stream: "sync.tasks", Group: "sync-worker", Consumer: "worker-1",
-    MinIdle: time.Minute, Start: "0-0",
-})
-_ = stale
-_ = next
-for _, msg := range msgs {
-    // 消费端必须先检查业务幂等键
-    _ = stream.Ack(ctx, app.Redis, msg.Stream, "sync-worker", msg.ID)
-}
 ```
+
+长期消费者必须优先使用 `RunGroupConsumer`，由 kit 统一处理消费组创建、stale pending 消息、故障退避、同类错误聚合和恢复日志。`ReadGroup`、`ClaimStale` 只用于确实需要自行编排循环的场景；调用方自行循环时必须实现等价的退避与日志限频。
 
 ## 五、配置
 
