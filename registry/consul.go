@@ -16,10 +16,11 @@ import (
 
 // consulRegistry implements Registry using HashiCorp Consul.
 type consulRegistry struct {
-	client *consul.Client
-	cfg    Config
-	mu     sync.Mutex
-	checks map[string]string // instanceID → checkID
+	client  *consul.Client
+	cfg     Config
+	mu      sync.Mutex
+	checks  map[string]string             // instanceID → checkID
+	cancels map[string]context.CancelFunc // instanceID → TTL refresh cancel
 }
 
 // NewConsul creates a new Consul-backed registry.
@@ -30,6 +31,9 @@ func NewConsul(cfg Config) (Registry, error) {
 	}
 	if addr == "" {
 		return nil, fmt.Errorf("registry: no consul address configured")
+	}
+	if _, err := cfg.consulCheckType(); err != nil {
+		return nil, err
 	}
 
 	probeCfg, err := consulProbeConfig(addr, cfg.Token, cfg.dialTimeout())
@@ -52,9 +56,10 @@ func NewConsul(cfg Config) (Registry, error) {
 	}
 
 	return &consulRegistry{
-		client: client,
-		cfg:    cfg,
-		checks: make(map[string]string),
+		client:  client,
+		cfg:     cfg,
+		checks:  make(map[string]string),
+		cancels: make(map[string]context.CancelFunc),
 	}, nil
 }
 
@@ -102,6 +107,10 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 
 	ttl := r.cfg.ttl()
 	checkID := "check-" + svc.InstanceID
+	check, usesTTL, err := consulServiceCheck(r.cfg, checkID, checkAddr)
+	if err != nil {
+		return err
+	}
 
 	meta := make(map[string]string)
 	for k, v := range svc.Meta {
@@ -118,22 +127,42 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		Address: host,
 		Port:    port,
 		Meta:    meta,
-		Check: &consul.AgentServiceCheck{
-			CheckID:                        checkID,
-			HTTP:                           consulCheckURL(checkAddr, r.cfg.checkPath()),
-			Interval:                       fmt.Sprintf("%ds", ttl),
-			Timeout:                        fmt.Sprintf("%ds", minInt64(5, ttl)),
-			DeregisterCriticalServiceAfter: durationSeconds(r.cfg.deregisterCriticalAfter()),
-		},
+		Check:   check,
 	}
 
 	if err := r.client.Agent().ServiceRegister(reg); err != nil {
 		return fmt.Errorf("registry: consul register: %w", err)
 	}
 
+	var ttlCancel context.CancelFunc
+	var ttlCtx context.Context
+	if usesTTL {
+		if err := r.client.Agent().PassTTL(checkID, "initial"); err != nil {
+			_ = r.client.Agent().ServiceDeregister(svc.InstanceID)
+			return fmt.Errorf("registry: consul pass ttl: %w", err)
+		}
+		ttlCtx, ttlCancel = context.WithCancel(context.Background())
+	}
+
 	r.mu.Lock()
+	oldCancel := r.cancels[svc.InstanceID]
 	r.checks[svc.InstanceID] = checkID
+	if ttlCancel != nil {
+		r.cancels[svc.InstanceID] = ttlCancel
+	} else {
+		delete(r.cancels, svc.InstanceID)
+	}
 	r.mu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if ttlCancel != nil {
+		go r.refreshTTL(ttlCtx, svc, checkID, ttl)
+	}
+	checkType := "http"
+	if usesTTL {
+		checkType = "ttl"
+	}
 
 	slog.Info("registry: registered",
 		"backend", "consul",
@@ -142,8 +171,53 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		"addr", svc.Addr,
 		"grpc", svc.GRPCAddr,
 		"ttl", ttl,
+		"check_type", checkType,
 	)
 	return nil
+}
+
+func consulServiceCheck(cfg Config, checkID, checkAddr string) (*consul.AgentServiceCheck, bool, error) {
+	checkType, err := cfg.consulCheckType()
+	if err != nil {
+		return nil, false, err
+	}
+	check := &consul.AgentServiceCheck{
+		CheckID:                        checkID,
+		DeregisterCriticalServiceAfter: durationSeconds(cfg.deregisterCriticalAfter()),
+	}
+	if checkType == "http" {
+		ttl := cfg.ttl()
+		check.HTTP = consulCheckURL(checkAddr, cfg.checkPath())
+		check.Interval = fmt.Sprintf("%ds", ttl)
+		check.Timeout = fmt.Sprintf("%ds", minInt64(5, ttl))
+		return check, false, nil
+	}
+	check.TTL = fmt.Sprintf("%ds", cfg.ttl())
+	return check, true, nil
+}
+
+func (r *consulRegistry) refreshTTL(ctx context.Context, svc Service, checkID string, ttl int64) {
+	ticker := time.NewTicker(consulRefreshInterval(ttl))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.client.Agent().PassTTL(checkID, "alive"); err != nil {
+				slog.Warn("registry: consul ttl refresh failed",
+					"service", svc.Name, "instance", svc.InstanceID, "error", err)
+			}
+		}
+	}
+}
+
+func consulRefreshInterval(ttl int64) time.Duration {
+	interval := time.Duration(ttl/3) * time.Second
+	if interval < time.Second {
+		return time.Second
+	}
+	return interval
 }
 
 func consulCheckURL(addr, checkPath string) string {
@@ -164,6 +238,10 @@ func minInt64(a, b int64) int64 {
 
 func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string) error {
 	r.mu.Lock()
+	if cancel, ok := r.cancels[instanceID]; ok {
+		cancel()
+		delete(r.cancels, instanceID)
+	}
 	delete(r.checks, instanceID)
 	r.mu.Unlock()
 
@@ -176,9 +254,17 @@ func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string
 }
 
 func (r *consulRegistry) Discover(ctx context.Context, name string) ([]Service, error) {
-	entries, _, err := r.client.Health().Service(name, "", true, (&consul.QueryOptions{}).WithContext(ctx))
+	services, _, err := r.discover(ctx, name, &consul.QueryOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("registry: consul discover: %w", err)
+		return nil, err
+	}
+	return services, nil
+}
+
+func (r *consulRegistry) discover(ctx context.Context, name string, query *consul.QueryOptions) ([]Service, uint64, error) {
+	entries, meta, err := r.client.Health().Service(name, "", true, query.WithContext(ctx))
+	if err != nil {
+		return nil, 0, fmt.Errorf("registry: consul discover: %w", err)
 	}
 
 	services := make([]Service, 0, len(entries))
@@ -203,14 +289,17 @@ func (r *consulRegistry) Discover(ctx context.Context, name string) ([]Service, 
 		}
 		services = append(services, svc)
 	}
-	return services, nil
+	if meta == nil {
+		return services, 0, nil
+	}
+	return services, meta.LastIndex, nil
 }
 
 func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, error) {
 	ch := make(chan Event, 32)
 
 	// First send current state
-	current, err := r.Discover(ctx, name)
+	current, lastIndex, err := r.discover(ctx, name, &consul.QueryOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +312,6 @@ func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, 
 			}
 		}
 
-		var lastIndex uint64
 		known := make(map[string]Service)
 		for _, svc := range current {
 			known[svc.InstanceID] = svc
@@ -306,6 +394,10 @@ func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, 
 
 func (r *consulRegistry) Close() error {
 	r.mu.Lock()
+	for _, cancel := range r.cancels {
+		cancel()
+	}
+	r.cancels = make(map[string]context.CancelFunc)
 	checks := r.checks
 	r.checks = make(map[string]string)
 	r.mu.Unlock()

@@ -118,6 +118,15 @@ func TestEnvName(t *testing.T) {
 	}
 }
 
+func TestRegistryConfigDefaultsBootConsulCheckToHTTP(t *testing.T) {
+	if got := (&RegistryConfig{}).consulCheckType(); got != "http" {
+		t.Fatalf("default boot consul check type = %q", got)
+	}
+	if got := (&RegistryConfig{CheckType: "ttl"}).consulCheckType(); got != "ttl" {
+		t.Fatalf("explicit boot consul check type = %q", got)
+	}
+}
+
 func TestCloneConfigDeepCopiesMutableFields(t *testing.T) {
 	trueValue := true
 	falseValue := false

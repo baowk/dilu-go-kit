@@ -80,11 +80,19 @@ type RegistryConfig struct {
 	Prefix                  string   `mapstructure:"prefix"`                  // service discovery prefix, default "/mofang/services/"
 	TTL                     int      `mapstructure:"ttl"`                     // lease/check TTL in seconds, default 30
 	DialTimeout             int      `mapstructure:"dialTimeout"`             // seconds, default 5
+	CheckType               string   `mapstructure:"checkType"`               // consul check: "http" (boot default) or "ttl"
 	CheckPath               string   `mapstructure:"checkPath"`               // consul readiness check path, default "/ready"
 	DeregisterCriticalAfter int      `mapstructure:"deregisterCriticalAfter"` // consul critical deregister delay in seconds, default 300
 	ConfigKey               string   `mapstructure:"configKey"`               // remote config key prefix, e.g. "/config/" → auto appends server.name
 	ConfigNode              string   `mapstructure:"configNode"`              // node ID for per-instance override (optional, or env REMOTE_NODE)
 	ConfigFormat            string   `mapstructure:"configFormat"`            // "yaml" (default) or "json"
+}
+
+func (r *RegistryConfig) consulCheckType() string {
+	if strings.TrimSpace(r.CheckType) == "" {
+		return "http"
+	}
+	return r.CheckType
 }
 
 // ServerConfig describes the HTTP server.

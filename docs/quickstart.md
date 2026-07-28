@@ -115,6 +115,7 @@ registry:
   type: etcd                # etcd / consul
   endpoints:
     - "127.0.0.1:2379"
+  checkType: http          # boot 中 consul 默认 http，可改为 ttl
   checkPath: "/ready"       # consul readiness check path
   deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # configKey: "/config/"   # 启用远程配置（自动拼 server.name）

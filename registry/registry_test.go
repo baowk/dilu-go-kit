@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,6 +103,18 @@ func TestConfig_checkPath(t *testing.T) {
 	}
 }
 
+func TestConfig_consulCheckType(t *testing.T) {
+	if got, err := (&Config{}).consulCheckType(); err != nil || got != "ttl" {
+		t.Fatalf("default check type = %q, %v", got, err)
+	}
+	if got, err := (&Config{CheckType: "HTTP"}).consulCheckType(); err != nil || got != "http" {
+		t.Fatalf("HTTP check type = %q, %v", got, err)
+	}
+	if _, err := (&Config{CheckType: "grpc"}).consulCheckType(); err == nil {
+		t.Fatal("expected unsupported check type error")
+	}
+}
+
 func TestConfig_deregisterCriticalAfterDefault(t *testing.T) {
 	if got := (&Config{}).deregisterCriticalAfter(); got != 5*time.Minute {
 		t.Fatalf("default deregister critical after = %s", got)
@@ -114,6 +127,29 @@ func TestConfig_deregisterCriticalAfterDefault(t *testing.T) {
 func TestConsulCheckURLUsesReadyPath(t *testing.T) {
 	if got := consulCheckURL("10.0.1.5:7801", "/ready"); got != "http://10.0.1.5:7801/ready" {
 		t.Fatalf("check url = %q", got)
+	}
+}
+
+func TestConsulServiceCheckDefaultsToTTL(t *testing.T) {
+	check, usesTTL, err := consulServiceCheck(Config{}, "check-inst-1", "10.0.1.5:7801")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !usesTTL || check.TTL != "30s" || check.HTTP != "" {
+		t.Fatalf("TTL check = %+v, usesTTL=%v", check, usesTTL)
+	}
+	if check.DeregisterCriticalServiceAfter != "300s" {
+		t.Fatalf("deregister delay = %q", check.DeregisterCriticalServiceAfter)
+	}
+}
+
+func TestConsulServiceCheckSupportsHTTPReadiness(t *testing.T) {
+	check, usesTTL, err := consulServiceCheck(Config{CheckType: "http"}, "check-inst-1", "10.0.1.5:7801")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usesTTL || check.TTL != "" || check.HTTP != "http://10.0.1.5:7801/ready" {
+		t.Fatalf("HTTP check = %+v, usesTTL=%v", check, usesTTL)
 	}
 }
 
@@ -197,7 +233,7 @@ func TestEtcdDeleteEventIncludesInstanceID(t *testing.T) {
 	}
 }
 
-func TestWatchUpstreamsPreservesLastKnownGoodWhenEmpty(t *testing.T) {
+func TestWatchUpstreamsReconcilesAndExpiresLastKnownGood(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -206,7 +242,10 @@ func TestWatchUpstreamsPreservesLastKnownGoodWhenEmpty(t *testing.T) {
 		discovered: []Service{{Name: "mf-user", InstanceID: "inst-1", Addr: "10.0.1.5:7801"}},
 		events:     events,
 	}
-	snapshots, err := WatchUpstreams(ctx, reg, "mf-user")
+	snapshots, err := WatchUpstreamsWithOptions(ctx, reg, "mf-user", WatchUpstreamsOptions{
+		StaleGracePeriod: 30 * time.Millisecond,
+		ResyncInterval:   time.Hour,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,16 +255,91 @@ func TestWatchUpstreamsPreservesLastKnownGoodWhenEmpty(t *testing.T) {
 		t.Fatalf("initial snapshot = %+v", initial)
 	}
 
+	reg.setDiscovered(nil)
 	events <- Event{Type: EventDelete, Service: Service{Name: "mf-user", InstanceID: "inst-1"}}
-	stale := <-snapshots
-	if !stale.Stale || len(stale.Services) != 1 || stale.Services[0].InstanceID != "inst-1" {
+	stale := receiveSnapshot(t, snapshots)
+	if !stale.Stale || stale.StaleSince.IsZero() || len(stale.Services) != 1 || stale.Services[0].InstanceID != "inst-1" {
 		t.Fatalf("stale snapshot = %+v", stale)
+	}
+	expired := receiveSnapshot(t, snapshots)
+	if !expired.Stale || len(expired.Services) != 0 || !expired.StaleSince.Equal(stale.StaleSince) {
+		t.Fatalf("expired snapshot = %+v", expired)
+	}
+}
+
+func TestWatchUpstreamsEstablishesWatchBeforeInitialDiscover(t *testing.T) {
+	reg := &fakeRegistry{
+		discovered: []Service{{Name: "mf-user", InstanceID: "deleted", Addr: "10.0.1.5:7801"}},
+		events:     make(chan Event),
+	}
+	reg.onWatch = func() { reg.setDiscovered(nil) }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots, err := WatchUpstreamsWithOptions(ctx, reg, "mf-user", WatchUpstreamsOptions{ResyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := receiveSnapshot(t, snapshots)
+	if !initial.Stale || len(initial.Services) != 0 {
+		t.Fatalf("initial snapshot retained pre-watch service: %+v", initial)
+	}
+}
+
+func TestWatchUpstreamsPeriodicResyncRepairsMissedEvent(t *testing.T) {
+	reg := &fakeRegistry{
+		discovered: []Service{{Name: "mf-user", InstanceID: "inst-1", Addr: "10.0.1.5:7801"}},
+		events:     make(chan Event),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots, err := WatchUpstreamsWithOptions(ctx, reg, "mf-user", WatchUpstreamsOptions{
+		StaleGracePeriod: time.Second,
+		ResyncInterval:   20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = receiveSnapshot(t, snapshots)
+	reg.setDiscovered(nil)
+	stale := receiveSnapshot(t, snapshots)
+	if !stale.Stale || len(stale.Services) != 1 {
+		t.Fatalf("resynced snapshot = %+v", stale)
+	}
+}
+
+func TestWatchUpstreamsReconcilesAgainBeforeStaleExpiry(t *testing.T) {
+	events := make(chan Event, 1)
+	reg := &fakeRegistry{
+		discovered: []Service{{Name: "mf-user", InstanceID: "inst-1", Addr: "10.0.1.5:7801"}},
+		events:     events,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots, err := WatchUpstreamsWithOptions(ctx, reg, "mf-user", WatchUpstreamsOptions{
+		StaleGracePeriod: 30 * time.Millisecond,
+		ResyncInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = receiveSnapshot(t, snapshots)
+	reg.setDiscovered(nil)
+	events <- Event{Type: EventDelete, Service: Service{InstanceID: "inst-1"}}
+	_ = receiveSnapshot(t, snapshots)
+
+	reg.setDiscovered([]Service{{Name: "mf-user", InstanceID: "inst-2", Addr: "10.0.1.6:7801"}})
+	recovered := receiveSnapshot(t, snapshots)
+	if recovered.Stale || len(recovered.Services) != 1 || recovered.Services[0].InstanceID != "inst-2" {
+		t.Fatalf("expiry reconciliation snapshot = %+v", recovered)
 	}
 }
 
 type fakeRegistry struct {
+	mu         sync.Mutex
 	discovered []Service
 	events     chan Event
+	onWatch    func()
 }
 
 func (r *fakeRegistry) Register(context.Context, Service) error { return nil }
@@ -233,14 +347,39 @@ func (r *fakeRegistry) Register(context.Context, Service) error { return nil }
 func (r *fakeRegistry) Deregister(context.Context, string, string) error { return nil }
 
 func (r *fakeRegistry) Discover(context.Context, string) ([]Service, error) {
-	return r.discovered, nil
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return cloneServices(r.discovered), nil
 }
 
 func (r *fakeRegistry) Watch(context.Context, string) (<-chan Event, error) {
+	if r.onWatch != nil {
+		r.onWatch()
+	}
 	return r.events, nil
 }
 
 func (r *fakeRegistry) Close() error { return nil }
+
+func (r *fakeRegistry) setDiscovered(services []Service) {
+	r.mu.Lock()
+	r.discovered = cloneServices(services)
+	r.mu.Unlock()
+}
+
+func receiveSnapshot(t *testing.T, snapshots <-chan UpstreamSnapshot) UpstreamSnapshot {
+	t.Helper()
+	select {
+	case snapshot, ok := <-snapshots:
+		if !ok {
+			t.Fatal("snapshot channel closed")
+		}
+		return snapshot
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upstream snapshot")
+		return UpstreamSnapshot{}
+	}
+}
 
 // --------------- New factory ---------------
 

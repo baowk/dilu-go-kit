@@ -153,6 +153,7 @@ func New(cfgPath string) (*App, error) {
 			Prefix:                  cfg.Registry.Prefix,
 			TTL:                     cfg.Registry.TTL,
 			DialTimeout:             cfg.Registry.DialTimeout,
+			CheckType:               cfg.Registry.consulCheckType(),
 			CheckPath:               cfg.Registry.CheckPath,
 			DeregisterCriticalAfter: cfg.Registry.DeregisterCriticalAfter,
 		})

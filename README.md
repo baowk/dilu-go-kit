@@ -304,14 +304,19 @@ registry:
   type: consul
   address: "127.0.0.1:8500"
   token: ""                    # ACL token（可选）
+  checkType: http              # boot 默认 http；可显式改为 ttl
   checkPath: "/ready"           # Consul HTTP readiness check
   deregisterCriticalAfter: 300  # critical 后 5 分钟自动摘除，建议 300-600 秒
 ```
 
-服务启动自动注册，关闭自动注销。Consul 会检查实例的 `/ready`，避免把
-存活检查和就绪检查混用。网关应使用 `registry.WatchUpstreams` 实时发现变更；
-当 healthy 实例临时为空时，它会保留 last known good upstreams 并标记
-`stale=true`，避免短抖动清空路由。
+服务启动自动注册，关闭自动注销。`boot` 中的 Consul 默认检查实例
+`/ready`，避免把存活检查和就绪检查混用。独立使用 `registry.NewConsul`
+时为了兼容已有服务，`checkType` 默认仍为 `ttl`。
+
+网关应使用 `registry.WatchUpstreams` 实时发现变更。healthy 实例临时为空时，
+它会保留 last known good upstreams 并标记 `stale=true`；默认 30 秒后
+发布空路由，不会永久转发到已下线实例。需要调整时使用
+`registry.WatchUpstreamsWithOptions`。
 
 ## 远程配置
 
@@ -436,6 +441,7 @@ registry:
   type: etcd                  # etcd / consul
   endpoints: ["127.0.0.1:2379"]
   dialTimeout: 5
+  checkType: http            # boot 中 consul 默认 http，可改为 ttl
   checkPath: "/ready"         # consul readiness check path
   deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # address: "127.0.0.1:8500"  # consul
