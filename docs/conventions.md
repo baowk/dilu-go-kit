@@ -427,6 +427,9 @@ registry:
   prefix: "/services/"
   ttl: 30
   dialTimeout: 5
+  checkType: http          # boot 中 consul 默认 http，可改为 ttl
+  checkPath: "/ready"       # consul HTTP readiness check path
+  deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   configKey: "/config/"     # 有值即启用远程配置（自动拼 server.name）
   # configNode: "node-1"   # 节点级覆盖（可选，或 env REMOTE_NODE）
   # configFormat: yaml      # yaml（默认）/ json
@@ -456,11 +459,21 @@ value: {"name":"mf-user","instance_id":"mf-user-host-1234-56789","addr":"10.0.1.
 lease: 30s TTL + keepalive
 ```
 
+`boot` 中的 Consul 注册默认使用 HTTP readiness check，检查
+`http://{addr}/ready`；`/health` 表示进程存活，`/ready` 表示实例可接收流量。
+独立使用 `registry.NewConsul` 时 `checkType` 默认为 `ttl`，避免破坏没有 HTTP
+就绪端点的已有服务。`DeregisterCriticalServiceAfter` 默认 300 秒，生产建议
+保持 300-600 秒，避免短暂抖动直接删除实例。
+
 **网关侧**：Watch 前缀，动态更新路由表，新服务上线/下线无需改配置。
+网关应优先使用 `registry.WatchUpstreams`，当 healthy 实例临时为空时保留
+last known good upstreams，并将快照标记为 `stale=true` 后告警。默认宽限期是
+30 秒，超时后发布空 upstreams；可用 `registry.WatchUpstreamsWithOptions`
+调整 `StaleGracePeriod` 和 `ResyncInterval`。
 
 **本地开发**：`registry.enable: false` 即可关闭，使用静态地址。
 
-**注册地址**：`server.addr` / `grpc.addr` 是监听地址，`advertiseAddr` 是注册给其他服务连接的地址。多机或容器部署建议显式配置 `server.advertiseAddr` / `grpc.advertiseAddr`，也可用 `SERVER_ADVERTISE_ADDR` / `GRPC_ADVERTISE_ADDR` 注入。
+**注册地址**：`server.addr` / `grpc.addr` 是监听地址，`advertiseAddr` 是注册给其他服务连接的地址。多机或容器部署建议显式配置 `server.advertiseAddr` / `grpc.advertiseAddr`，也可用 `SERVER_ADVERTISE_ADDR` / `GRPC_ADVERTISE_ADDR` 注入。未显式配置时，框架优先使用 `MF_ADVERTISE_IP`，其次 `POD_IP`，最后才自动探测本机 IP；不要使用 Kubernetes `SERVICE_IP` 注册实例地址。
 
 ## 七、远程配置
 

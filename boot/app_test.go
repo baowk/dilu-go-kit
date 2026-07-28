@@ -2,6 +2,7 @@ package boot
 
 import (
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 )
 
 func TestResolveAdvertiseAddrUsesExplicitValue(t *testing.T) {
+	t.Setenv("MF_ADVERTISE_IP", "10.0.1.9")
 	got := resolveAdvertiseAddr(":8080", "10.0.1.5:8080")
 	if got != "10.0.1.5:8080" {
 		t.Fatalf("resolveAdvertiseAddr = %q", got)
@@ -75,5 +77,56 @@ func TestResolveAdvertiseAddrKeepsSpecificHost(t *testing.T) {
 	got := resolveAdvertiseAddr("127.0.0.1:8080", "")
 	if got != "127.0.0.1:8080" {
 		t.Fatalf("resolveAdvertiseAddr = %q", got)
+	}
+}
+
+func TestResolveAdvertiseAddrUsesMFAdvertiseIPBeforePodIP(t *testing.T) {
+	t.Setenv("MF_ADVERTISE_IP", "10.0.1.5")
+	t.Setenv("POD_IP", "10.0.1.6")
+	t.Setenv("SERVICE_IP", "10.0.1.7")
+
+	got := resolveAdvertiseAddr(":8080", "")
+	if got != "10.0.1.5:8080" {
+		t.Fatalf("resolveAdvertiseAddr = %q", got)
+	}
+}
+
+func TestResolveAdvertiseAddrUsesPodIPFallback(t *testing.T) {
+	t.Setenv("POD_IP", "10.0.1.6")
+	t.Setenv("SERVICE_IP", "10.0.1.7")
+
+	got := resolveAdvertiseAddr("127.0.0.1:8080", "")
+	if got != "10.0.1.6:8080" {
+		t.Fatalf("resolveAdvertiseAddr = %q", got)
+	}
+}
+
+func TestEnsureOperationalRoutesAddsHealthAndReady(t *testing.T) {
+	r := gin.New()
+	ensureOperationalRoutes(r)
+
+	if !hasRoute(r, http.MethodGet, "/health") {
+		t.Fatal("missing /health route")
+	}
+	if !hasRoute(r, http.MethodGet, "/ready") {
+		t.Fatal("missing /ready route")
+	}
+}
+
+func TestEnsureOperationalRoutesKeepsExistingReady(t *testing.T) {
+	r := gin.New()
+	r.GET("/ready", func(c *gin.Context) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not-ready"})
+	})
+	ensureOperationalRoutes(r)
+
+	count := 0
+	for _, route := range r.Routes() {
+		if route.Method == http.MethodGet && route.Path == "/ready" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("/ready route count = %d", count)
 	}
 }

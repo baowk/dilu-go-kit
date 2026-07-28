@@ -211,19 +211,15 @@ func (r *etcdRegistry) Discover(ctx context.Context, name string) ([]Service, er
 
 func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, error) {
 	prefix := servicePrefixKey(r.cfg.prefix(), name)
+	snapshot, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
+	if err != nil {
+		return nil, fmt.Errorf("registry: etcd watch snapshot: %w", err)
+	}
 	ch := make(chan Event, 32)
 	go func() {
 		defer close(ch)
 		known := make(map[string]Service)
 		for ctx.Err() == nil {
-			snapshot, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
-			if err != nil {
-				slog.Warn("registry: etcd watch snapshot failed", "service", name, "error", err)
-				if !waitForContext(ctx, time.Second) {
-					return
-				}
-				continue
-			}
 			current := make(map[string]Service, len(snapshot.Kvs))
 			for _, kv := range snapshot.Kvs {
 				svc, err := unmarshalService(kv.Value)
@@ -271,6 +267,16 @@ func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, er
 			}
 			if !restart || !waitForContext(ctx, time.Second) {
 				return
+			}
+			for {
+				snapshot, err = r.client.Get(ctx, prefix, clientv3.WithPrefix())
+				if err == nil {
+					break
+				}
+				slog.Warn("registry: etcd watch snapshot failed", "service", name, "error", err)
+				if !waitForContext(ctx, time.Second) {
+					return
+				}
 			}
 		}
 	}()

@@ -115,6 +115,9 @@ registry:
   type: etcd                # etcd / consul
   endpoints:
     - "127.0.0.1:2379"
+  checkType: http          # boot 中 consul 默认 http，可改为 ttl
+  checkPath: "/ready"       # consul readiness check path
+  deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # configKey: "/config/"   # 启用远程配置（自动拼 server.name）
 
 jwt:
@@ -303,8 +306,8 @@ go run cmd/main.go
 多节点运行可用环境变量区分：
 
 ```bash
-REMOTE_NODE=node-1 SERVER_ADDR=:7801 SERVER_ADVERTISE_ADDR=10.0.1.5:7801 DATABASE_MAIN_DSN='...' JWT_SECRET='...' ./my-service
-REMOTE_NODE=node-2 SERVER_ADDR=:7802 SERVER_ADVERTISE_ADDR=10.0.1.6:7802 DATABASE_MAIN_DSN='...' JWT_SECRET='...' ./my-service
+REMOTE_NODE=node-1 SERVER_ADDR=:7801 MF_ADVERTISE_IP=10.0.1.5 DATABASE_MAIN_DSN='...' JWT_SECRET='...' ./my-service
+REMOTE_NODE=node-2 SERVER_ADDR=:7802 MF_ADVERTISE_IP=10.0.1.6 DATABASE_MAIN_DSN='...' JWT_SECRET='...' ./my-service
 ```
 
 ## 完整示例

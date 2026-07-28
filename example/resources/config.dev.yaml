@@ -65,6 +65,9 @@ registry:
   endpoints:                     # etcd endpoints
     - "127.0.0.1:2379"
   dialTimeout: 5
+  checkType: http                # boot default for consul; use "ttl" to keep TTL checks
+  checkPath: "/ready"            # consul readiness check path
+  deregisterCriticalAfter: 300   # consul critical deregister delay in seconds
   # address: "127.0.0.1:8500"   # consul address (used when type: consul)
   # token: ""                    # consul ACL token (optional)
   # configKey: "/config/"        # enable remote config: auto key = configKey + server.name
