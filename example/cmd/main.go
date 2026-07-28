@@ -51,6 +51,9 @@ func main() {
 		a.Gin.GET("/health", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		})
+		a.Gin.GET("/ready", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		})
 		a.Gin.GET("/metrics", metrics.Handler())
 
 		// Business routes are protected by JWT in router.Init.

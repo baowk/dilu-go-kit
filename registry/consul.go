@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"reflect"
 	"strconv"
 	"sync"
@@ -15,11 +16,10 @@ import (
 
 // consulRegistry implements Registry using HashiCorp Consul.
 type consulRegistry struct {
-	client  *consul.Client
-	cfg     Config
-	mu      sync.Mutex
-	checks  map[string]string             // instanceID → checkID
-	cancels map[string]context.CancelFunc // instanceID → TTL refresh cancel
+	client *consul.Client
+	cfg    Config
+	mu     sync.Mutex
+	checks map[string]string // instanceID → checkID
 }
 
 // NewConsul creates a new Consul-backed registry.
@@ -52,10 +52,9 @@ func NewConsul(cfg Config) (Registry, error) {
 	}
 
 	return &consulRegistry{
-		client:  client,
-		cfg:     cfg,
-		checks:  make(map[string]string),
-		cancels: make(map[string]context.CancelFunc),
+		client: client,
+		cfg:    cfg,
+		checks: make(map[string]string),
 	}, nil
 }
 
@@ -95,6 +94,7 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 	if host == "" {
 		host = localIP()
 	}
+	checkAddr := net.JoinHostPort(host, portStr)
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port <= 0 || port > 65535 {
 		return fmt.Errorf("registry: invalid port %q", portStr)
@@ -120,8 +120,10 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		Meta:    meta,
 		Check: &consul.AgentServiceCheck{
 			CheckID:                        checkID,
-			TTL:                            fmt.Sprintf("%ds", ttl),
-			DeregisterCriticalServiceAfter: fmt.Sprintf("%ds", ttl*3),
+			HTTP:                           consulCheckURL(checkAddr, r.cfg.checkPath()),
+			Interval:                       fmt.Sprintf("%ds", ttl),
+			Timeout:                        fmt.Sprintf("%ds", minInt64(5, ttl)),
+			DeregisterCriticalServiceAfter: durationSeconds(r.cfg.deregisterCriticalAfter()),
 		},
 	}
 
@@ -129,40 +131,9 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		return fmt.Errorf("registry: consul register: %w", err)
 	}
 
-	// Pass initial health check
-	if err := r.client.Agent().PassTTL(checkID, "initial"); err != nil {
-		_ = r.client.Agent().ServiceDeregister(svc.InstanceID)
-		return fmt.Errorf("registry: consul pass ttl: %w", err)
-	}
-
-	ttlCtx, ttlCancel := context.WithCancel(context.Background())
-
 	r.mu.Lock()
-	oldCancel := r.cancels[svc.InstanceID]
 	r.checks[svc.InstanceID] = checkID
-	r.cancels[svc.InstanceID] = ttlCancel
 	r.mu.Unlock()
-	if oldCancel != nil {
-		oldCancel()
-	}
-
-	// Background TTL refresh
-	go func() {
-		ticker := time.NewTicker(consulRefreshInterval(ttl))
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ttlCtx.Done():
-				return
-			case <-ticker.C:
-				if err := r.client.Agent().PassTTL(checkID, "alive"); err != nil {
-					slog.Warn("registry: consul ttl refresh failed",
-						"service", svc.Name, "instance", svc.InstanceID, "error", err)
-					continue
-				}
-			}
-		}
-	}()
 
 	slog.Info("registry: registered",
 		"backend", "consul",
@@ -175,20 +146,24 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 	return nil
 }
 
-func consulRefreshInterval(ttl int64) time.Duration {
-	interval := time.Duration(ttl/3) * time.Second
-	if interval < time.Second {
-		return time.Second
+func consulCheckURL(addr, checkPath string) string {
+	u := url.URL{Scheme: "http", Host: addr, Path: checkPath}
+	return u.String()
+}
+
+func durationSeconds(d time.Duration) string {
+	return fmt.Sprintf("%ds", int64(d/time.Second))
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
 	}
-	return interval
+	return b
 }
 
 func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string) error {
 	r.mu.Lock()
-	if cancel, ok := r.cancels[instanceID]; ok {
-		cancel()
-		delete(r.cancels, instanceID)
-	}
 	delete(r.checks, instanceID)
 	r.mu.Unlock()
 
@@ -331,11 +306,6 @@ func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, 
 
 func (r *consulRegistry) Close() error {
 	r.mu.Lock()
-	for _, cancel := range r.cancels {
-		cancel()
-	}
-	r.cancels = make(map[string]context.CancelFunc)
-
 	checks := r.checks
 	r.checks = make(map[string]string)
 	r.mu.Unlock()

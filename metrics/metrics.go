@@ -95,7 +95,7 @@ func serviceName() string {
 func GinMiddleware() gin.HandlerFunc {
 	ensureCollectors()
 	return func(c *gin.Context) {
-		if c.Request.URL.Path == "/metrics" || c.Request.URL.Path == "/health" || c.Request.URL.Path == "/api/health" {
+		if c.Request.URL.Path == "/metrics" || c.Request.URL.Path == "/health" || c.Request.URL.Path == "/ready" || c.Request.URL.Path == "/api/health" {
 			c.Next()
 			return
 		}

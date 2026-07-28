@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"net"
 	"strings"
 	"testing"
@@ -47,12 +48,6 @@ func TestConfig_prefix(t *testing.T) {
 	}
 }
 
-func TestConsulRefreshIntervalNeverZero(t *testing.T) {
-	if got := consulRefreshInterval(1); got != time.Second {
-		t.Fatalf("interval = %s", got)
-	}
-}
-
 func TestConsulConfigAppliesExplicitToken(t *testing.T) {
 	cfg := consulConfig("127.0.0.1:8500", "explicit-token")
 	if cfg.Address != "127.0.0.1:8500" || cfg.Token != "explicit-token" {
@@ -95,6 +90,30 @@ func TestConfig_dialTimeout(t *testing.T) {
 	c2 := Config{DialTimeout: 10}
 	if c2.dialTimeout() != 10*time.Second {
 		t.Errorf("custom dialTimeout = %v", c2.dialTimeout())
+	}
+}
+
+func TestConfig_checkPath(t *testing.T) {
+	if got := (&Config{}).checkPath(); got != "/ready" {
+		t.Fatalf("default check path = %q", got)
+	}
+	if got := (&Config{CheckPath: "custom-ready"}).checkPath(); got != "/custom-ready" {
+		t.Fatalf("normalized check path = %q", got)
+	}
+}
+
+func TestConfig_deregisterCriticalAfterDefault(t *testing.T) {
+	if got := (&Config{}).deregisterCriticalAfter(); got != 5*time.Minute {
+		t.Fatalf("default deregister critical after = %s", got)
+	}
+	if got := (&Config{DeregisterCriticalAfter: 600}).deregisterCriticalAfter(); got != 10*time.Minute {
+		t.Fatalf("custom deregister critical after = %s", got)
+	}
+}
+
+func TestConsulCheckURLUsesReadyPath(t *testing.T) {
+	if got := consulCheckURL("10.0.1.5:7801", "/ready"); got != "http://10.0.1.5:7801/ready" {
+		t.Fatalf("check url = %q", got)
 	}
 }
 
@@ -177,6 +196,51 @@ func TestEtcdDeleteEventIncludesInstanceID(t *testing.T) {
 		t.Fatalf("event = %+v ok=%v", event, ok)
 	}
 }
+
+func TestWatchUpstreamsPreservesLastKnownGoodWhenEmpty(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events := make(chan Event, 4)
+	reg := &fakeRegistry{
+		discovered: []Service{{Name: "mf-user", InstanceID: "inst-1", Addr: "10.0.1.5:7801"}},
+		events:     events,
+	}
+	snapshots, err := WatchUpstreams(ctx, reg, "mf-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	initial := <-snapshots
+	if initial.Stale || len(initial.Services) != 1 || initial.Services[0].InstanceID != "inst-1" {
+		t.Fatalf("initial snapshot = %+v", initial)
+	}
+
+	events <- Event{Type: EventDelete, Service: Service{Name: "mf-user", InstanceID: "inst-1"}}
+	stale := <-snapshots
+	if !stale.Stale || len(stale.Services) != 1 || stale.Services[0].InstanceID != "inst-1" {
+		t.Fatalf("stale snapshot = %+v", stale)
+	}
+}
+
+type fakeRegistry struct {
+	discovered []Service
+	events     chan Event
+}
+
+func (r *fakeRegistry) Register(context.Context, Service) error { return nil }
+
+func (r *fakeRegistry) Deregister(context.Context, string, string) error { return nil }
+
+func (r *fakeRegistry) Discover(context.Context, string) ([]Service, error) {
+	return r.discovered, nil
+}
+
+func (r *fakeRegistry) Watch(context.Context, string) (<-chan Event, error) {
+	return r.events, nil
+}
+
+func (r *fakeRegistry) Close() error { return nil }
 
 // --------------- New factory ---------------
 

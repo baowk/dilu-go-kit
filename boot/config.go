@@ -72,17 +72,19 @@ type NotifyConfig struct {
 // RegistryConfig describes the service registry (etcd or consul).
 // It also drives optional remote config loading from the same backend.
 type RegistryConfig struct {
-	Enable       bool     `mapstructure:"enable"`
-	Type         string   `mapstructure:"type"`         // "etcd" (default) or "consul"
-	Endpoints    []string `mapstructure:"endpoints"`    // etcd endpoints, e.g. ["127.0.0.1:2379"]
-	Address      string   `mapstructure:"address"`      // consul address, e.g. "127.0.0.1:8500"
-	Token        string   `mapstructure:"token"`        // consul ACL token (optional)
-	Prefix       string   `mapstructure:"prefix"`       // service discovery prefix, default "/mofang/services/"
-	TTL          int      `mapstructure:"ttl"`          // lease/check TTL in seconds, default 30
-	DialTimeout  int      `mapstructure:"dialTimeout"`  // seconds, default 5
-	ConfigKey    string   `mapstructure:"configKey"`    // remote config key prefix, e.g. "/config/" → auto appends server.name
-	ConfigNode   string   `mapstructure:"configNode"`   // node ID for per-instance override (optional, or env REMOTE_NODE)
-	ConfigFormat string   `mapstructure:"configFormat"` // "yaml" (default) or "json"
+	Enable                  bool     `mapstructure:"enable"`
+	Type                    string   `mapstructure:"type"`                    // "etcd" (default) or "consul"
+	Endpoints               []string `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
+	Address                 string   `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
+	Token                   string   `mapstructure:"token"`                   // consul ACL token (optional)
+	Prefix                  string   `mapstructure:"prefix"`                  // service discovery prefix, default "/mofang/services/"
+	TTL                     int      `mapstructure:"ttl"`                     // lease/check TTL in seconds, default 30
+	DialTimeout             int      `mapstructure:"dialTimeout"`             // seconds, default 5
+	CheckPath               string   `mapstructure:"checkPath"`               // consul readiness check path, default "/ready"
+	DeregisterCriticalAfter int      `mapstructure:"deregisterCriticalAfter"` // consul critical deregister delay in seconds, default 300
+	ConfigKey               string   `mapstructure:"configKey"`               // remote config key prefix, e.g. "/config/" → auto appends server.name
+	ConfigNode              string   `mapstructure:"configNode"`              // node ID for per-instance override (optional, or env REMOTE_NODE)
+	ConfigFormat            string   `mapstructure:"configFormat"`            // "yaml" (default) or "json"
 }
 
 // ServerConfig describes the HTTP server.

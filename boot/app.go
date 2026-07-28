@@ -146,13 +146,15 @@ func New(cfgPath string) (*App, error) {
 	// Registry (optional)
 	if cfg.Registry.Enable && (len(cfg.Registry.Endpoints) > 0 || cfg.Registry.Address != "") {
 		reg, err := registry.New(registry.Config{
-			Type:        cfg.Registry.Type,
-			Endpoints:   cfg.Registry.Endpoints,
-			Address:     cfg.Registry.Address,
-			Token:       cfg.Registry.Token,
-			Prefix:      cfg.Registry.Prefix,
-			TTL:         cfg.Registry.TTL,
-			DialTimeout: cfg.Registry.DialTimeout,
+			Type:                    cfg.Registry.Type,
+			Endpoints:               cfg.Registry.Endpoints,
+			Address:                 cfg.Registry.Address,
+			Token:                   cfg.Registry.Token,
+			Prefix:                  cfg.Registry.Prefix,
+			TTL:                     cfg.Registry.TTL,
+			DialTimeout:             cfg.Registry.DialTimeout,
+			CheckPath:               cfg.Registry.CheckPath,
+			DeregisterCriticalAfter: cfg.Registry.DeregisterCriticalAfter,
 		})
 		if err != nil {
 			closeDBs(app.DBs)
@@ -200,6 +202,7 @@ func (a *App) Run(setup SetupFunc) error {
 		_ = a.Close()
 		return fmt.Errorf("setup: %w", err)
 	}
+	ensureOperationalRoutes(a.Gin)
 
 	cfg := a.GetConfig()
 	httpLis, err := net.Listen("tcp", cfg.Server.Addr)
@@ -309,6 +312,31 @@ func defaultInt(value, fallback int) int {
 		return value
 	}
 	return fallback
+}
+
+func ensureOperationalRoutes(r *gin.Engine) {
+	if r == nil {
+		return
+	}
+	if !hasRoute(r, http.MethodGet, "/health") {
+		r.GET("/health", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		})
+	}
+	if !hasRoute(r, http.MethodGet, "/ready") {
+		r.GET("/ready", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		})
+	}
+}
+
+func hasRoute(r *gin.Engine, method, path string) bool {
+	for _, route := range r.Routes() {
+		if route.Method == method && route.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) shutdown(cfg *Config) error {
@@ -556,10 +584,22 @@ func resolveAdvertiseAddr(listenAddr, advertiseAddr string) string {
 	if err != nil || port == "" {
 		return listenAddr
 	}
+	if ip := advertiseIPFromEnv(); ip != "" {
+		return net.JoinHostPort(ip, port)
+	}
 	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
 		return net.JoinHostPort(localAdvertiseIP(), port)
 	}
 	return listenAddr
+}
+
+func advertiseIPFromEnv() string {
+	for _, name := range []string{"MF_ADVERTISE_IP", "POD_IP"} {
+		if ip := os.Getenv(name); ip != "" {
+			return ip
+		}
+	}
+	return ""
 }
 
 func localAdvertiseIP() string {

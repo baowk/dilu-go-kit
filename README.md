@@ -219,13 +219,19 @@ r.Use(metrics.GinMiddleware())
 r.GET("/health", func(c *gin.Context) {
     c.JSON(http.StatusOK, gin.H{"status": "ok"})
 })
+r.GET("/ready", func(c *gin.Context) {
+    c.JSON(http.StatusOK, gin.H{"status": "ok"})
+})
 r.GET("/metrics", metrics.Handler())
 ```
 
 `boot.New` 会用 `server.name` 初始化服务名，并自动给 boot 创建的 gRPC server 挂载指标。
 独立使用 metrics 包时，`metrics.Init` 可在中间件构造前后调用，也可再次调用；后续观测
 使用最新服务名。
-`/health` 和 `/metrics` 应位于 JWT 业务路由之外，并通过网络策略限制指标端点访问。
+`/health` 表示进程存活，`/ready` 表示实例可接收流量。两者和 `/metrics`
+应位于 JWT 业务路由之外，并通过网络策略限制指标端点访问。应用未显式注册
+`/health` 或 `/ready` 时，`boot.Run` 会补默认 OK 路由；需要依赖检查时自行注册
+更严格的 `/ready`。
 
 ## 事件通知
 
@@ -298,9 +304,14 @@ registry:
   type: consul
   address: "127.0.0.1:8500"
   token: ""                    # ACL token（可选）
+  checkPath: "/ready"           # Consul HTTP readiness check
+  deregisterCriticalAfter: 300  # critical 后 5 分钟自动摘除，建议 300-600 秒
 ```
 
-服务启动自动注册，关闭自动注销。网关 Watch 实时发现变更。
+服务启动自动注册，关闭自动注销。Consul 会检查实例的 `/ready`，避免把
+存活检查和就绪检查混用。网关应使用 `registry.WatchUpstreams` 实时发现变更；
+当 healthy 实例临时为空时，它会保留 last known good upstreams 并标记
+`stale=true`，避免短抖动清空路由。
 
 ## 远程配置
 
@@ -334,8 +345,8 @@ app.OnConfigApplied(func(cfg *boot.Config) { applyDynamicConfig(cfg) })
 同一服务多实例可用节点级配置区分：
 
 ```bash
-REMOTE_NODE=node-1 SERVER_ADDR=:7801 SERVER_ADVERTISE_ADDR=10.0.1.5:7801 ./my-service
-REMOTE_NODE=node-2 SERVER_ADDR=:7802 SERVER_ADVERTISE_ADDR=10.0.1.6:7802 ./my-service
+REMOTE_NODE=node-1 SERVER_ADDR=:7801 MF_ADVERTISE_IP=10.0.1.5 ./my-service
+REMOTE_NODE=node-2 SERVER_ADDR=:7802 MF_ADVERTISE_IP=10.0.1.6 ./my-service
 ```
 
 对应 KV：
@@ -425,6 +436,8 @@ registry:
   type: etcd                  # etcd / consul
   endpoints: ["127.0.0.1:2379"]
   dialTimeout: 5
+  checkPath: "/ready"         # consul readiness check path
+  deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # address: "127.0.0.1:8500"  # consul
   # token: ""                  # 建议用 REGISTRY_TOKEN 注入
   configKey: "/config/"       # 启用远程配置

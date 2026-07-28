@@ -23,8 +23,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -45,6 +47,14 @@ type Service struct {
 type Event struct {
 	Type    EventType // PUT or DELETE
 	Service Service
+}
+
+// UpstreamSnapshot is a service instance snapshot for gateway routing.
+// Stale means Services is the last known good snapshot because the registry
+// currently reports no healthy instances.
+type UpstreamSnapshot struct {
+	Services []Service
+	Stale    bool
 }
 
 // EventType is the type of a watch event.
@@ -75,15 +85,63 @@ type Registry interface {
 	Close() error
 }
 
+// WatchUpstreams watches a service and preserves the last known good upstreams
+// when the registry temporarily reports zero healthy instances.
+func WatchUpstreams(ctx context.Context, r Registry, name string) (<-chan UpstreamSnapshot, error) {
+	currentServices, err := r.Discover(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	events, err := r.Watch(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan UpstreamSnapshot, 8)
+	go func() {
+		defer close(ch)
+
+		current := servicesByInstanceID(currentServices)
+		lastGood := cloneServiceMap(current)
+		sendUpstreamSnapshot(ctx, ch, name, current, lastGood)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-events:
+				if !ok {
+					return
+				}
+				switch event.Type {
+				case EventPut:
+					current[event.Service.InstanceID] = event.Service
+				case EventDelete:
+					delete(current, event.Service.InstanceID)
+				}
+				if len(current) > 0 {
+					lastGood = cloneServiceMap(current)
+				}
+				if !sendUpstreamSnapshot(ctx, ch, name, current, lastGood) {
+					return
+				}
+			}
+		}
+	}()
+	return ch, nil
+}
+
 // Config for the registry.
 type Config struct {
-	Type        string   `mapstructure:"type"`        // "etcd" (default) or "consul"
-	Endpoints   []string `mapstructure:"endpoints"`   // etcd endpoints, e.g. ["127.0.0.1:2379"]
-	Address     string   `mapstructure:"address"`     // consul address, e.g. "127.0.0.1:8500"
-	Token       string   `mapstructure:"token"`       // consul ACL token (optional)
-	Prefix      string   `mapstructure:"prefix"`      // key prefix, default "/mofang/services/"
-	TTL         int      `mapstructure:"ttl"`         // lease/check TTL in seconds, default 30
-	DialTimeout int      `mapstructure:"dialTimeout"` // dial timeout in seconds, default 5
+	Type                    string   `mapstructure:"type"`                    // "etcd" (default) or "consul"
+	Endpoints               []string `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
+	Address                 string   `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
+	Token                   string   `mapstructure:"token"`                   // consul ACL token (optional)
+	Prefix                  string   `mapstructure:"prefix"`                  // key prefix, default "/mofang/services/"
+	TTL                     int      `mapstructure:"ttl"`                     // lease/check TTL in seconds, default 30
+	DialTimeout             int      `mapstructure:"dialTimeout"`             // dial timeout in seconds, default 5
+	CheckPath               string   `mapstructure:"checkPath"`               // consul HTTP readiness path, default "/ready"
+	DeregisterCriticalAfter int      `mapstructure:"deregisterCriticalAfter"` // consul critical deregister delay in seconds, default 300
 }
 
 func (c *Config) registryType() string {
@@ -124,6 +182,90 @@ func (c *Config) dialTimeout() time.Duration {
 		return time.Duration(c.DialTimeout) * time.Second
 	}
 	return 5 * time.Second
+}
+
+func (c *Config) checkPath() string {
+	if c.CheckPath == "" {
+		return "/ready"
+	}
+	if strings.HasPrefix(c.CheckPath, "/") {
+		return c.CheckPath
+	}
+	return "/" + c.CheckPath
+}
+
+func (c *Config) deregisterCriticalAfter() time.Duration {
+	if c.DeregisterCriticalAfter > 0 {
+		return time.Duration(c.DeregisterCriticalAfter) * time.Second
+	}
+	return 5 * time.Minute
+}
+
+func sendUpstreamSnapshot(ctx context.Context, ch chan<- UpstreamSnapshot, name string, current, lastGood map[string]Service) bool {
+	if len(current) > 0 {
+		return sendSnapshot(ctx, ch, UpstreamSnapshot{Services: mapServices(current)})
+	}
+	if len(lastGood) > 0 {
+		services := mapServices(lastGood)
+		slog.Warn("registry: no healthy upstreams; using last known good",
+			"service", name,
+			"instances", len(services),
+			"stale", true,
+		)
+		return sendSnapshot(ctx, ch, UpstreamSnapshot{Services: services, Stale: true})
+	}
+	slog.Warn("registry: no healthy upstreams and no last known good", "service", name, "stale", true)
+	return sendSnapshot(ctx, ch, UpstreamSnapshot{Stale: true})
+}
+
+func sendSnapshot(ctx context.Context, ch chan<- UpstreamSnapshot, snapshot UpstreamSnapshot) bool {
+	select {
+	case ch <- snapshot:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func servicesByInstanceID(services []Service) map[string]Service {
+	byID := make(map[string]Service, len(services))
+	for _, svc := range services {
+		byID[svc.InstanceID] = svc
+	}
+	return byID
+}
+
+func cloneServiceMap(services map[string]Service) map[string]Service {
+	cloned := make(map[string]Service, len(services))
+	for id, svc := range services {
+		cloned[id] = cloneService(svc)
+	}
+	return cloned
+}
+
+func mapServices(services map[string]Service) []Service {
+	ids := make([]string, 0, len(services))
+	for id := range services {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	out := make([]Service, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, cloneService(services[id]))
+	}
+	return out
+}
+
+func cloneService(svc Service) Service {
+	if svc.Meta == nil {
+		return svc
+	}
+	meta := make(map[string]string, len(svc.Meta))
+	for k, v := range svc.Meta {
+		meta[k] = v
+	}
+	svc.Meta = meta
+	return svc
 }
 
 // serviceKey builds the etcd key for a service instance.
