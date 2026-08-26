@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,6 +54,7 @@ type App struct {
 	closeOnce       sync.Once
 	callbacksOnce   sync.Once
 	closeErr        error
+	ready           atomic.Bool
 }
 
 // GetConfig returns the current config (thread-safe for use during runtime).
@@ -156,6 +158,7 @@ func New(cfgPath string) (*App, error) {
 			CheckType:               cfg.Registry.consulCheckType(),
 			CheckPath:               cfg.Registry.CheckPath,
 			DeregisterCriticalAfter: cfg.Registry.DeregisterCriticalAfter,
+			TLS:                     cfg.Registry.TLS,
 		})
 		if err != nil {
 			closeDBs(app.DBs)
@@ -203,7 +206,7 @@ func (a *App) Run(setup SetupFunc) error {
 		_ = a.Close()
 		return fmt.Errorf("setup: %w", err)
 	}
-	ensureOperationalRoutes(a.Gin)
+	ensureOperationalRoutesWithReady(a.Gin, a.ready.Load)
 
 	cfg := a.GetConfig()
 	httpLis, err := net.Listen("tcp", cfg.Server.Addr)
@@ -277,6 +280,7 @@ func (a *App) Run(setup SetupFunc) error {
 			return fmt.Errorf("on-start callback: %w", err)
 		}
 	}
+	a.ready.Store(true)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -316,8 +320,16 @@ func defaultInt(value, fallback int) int {
 }
 
 func ensureOperationalRoutes(r *gin.Engine) {
+	ensureOperationalRoutesWithReady(r)
+}
+
+func ensureOperationalRoutesWithReady(r *gin.Engine, ready ...func() bool) {
 	if r == nil {
 		return
+	}
+	isReady := func() bool { return true }
+	if len(ready) > 0 && ready[0] != nil {
+		isReady = ready[0]
 	}
 	if !hasRoute(r, http.MethodGet, "/health") {
 		r.GET("/health", func(c *gin.Context) {
@@ -326,6 +338,10 @@ func ensureOperationalRoutes(r *gin.Engine) {
 	}
 	if !hasRoute(r, http.MethodGet, "/ready") {
 		r.GET("/ready", func(c *gin.Context) {
+			if !isReady() {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not-ready"})
+				return
+			}
 			c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		})
 	}
@@ -341,6 +357,7 @@ func hasRoute(r *gin.Engine, method, path string) bool {
 }
 
 func (a *App) shutdown(cfg *Config) error {
+	a.ready.Store(false)
 	if a.watchCancel != nil {
 		a.watchCancel()
 	}

@@ -228,9 +228,14 @@ func remoteEtcdClient(reg RegistryConfig) (*clientv3.Client, error) {
 	if len(reg.Endpoints) == 0 {
 		return nil, fmt.Errorf("remote config: no etcd endpoints")
 	}
+	tlsConfig, err := reg.TLS.ClientTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("remote config: etcd TLS: %w", err)
+	}
 	return clientv3.New(clientv3.Config{
 		Endpoints:   reg.Endpoints,
 		DialTimeout: 5 * time.Second,
+		TLS:         tlsConfig,
 	})
 }
 
@@ -323,6 +328,19 @@ func remoteConsulClient(reg RegistryConfig) (*consul.Client, error) {
 	if reg.Token != "" {
 		cfg.Token = reg.Token
 	}
+	if reg.TLS.Enable {
+		tlsAddress := addr
+		if reg.TLS.ServerName != "" {
+			tlsAddress = reg.TLS.ServerName
+		}
+		cfg.Scheme = "https"
+		cfg.TLSConfig = consul.TLSConfig{
+			Address:  tlsAddress,
+			CAFile:   reg.TLS.CAFile,
+			CertFile: reg.TLS.CertFile,
+			KeyFile:  reg.TLS.KeyFile,
+		}
+	}
 	return consul.NewClient(cfg)
 }
 
@@ -398,6 +416,9 @@ func unmarshalBytes(data []byte, format string, cfg any) error {
 	v.SetConfigType(format)
 	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("remote config: parse %s: %w", format, err)
+	}
+	if path := sensitiveRemotePath(v.AllSettings()); path != "" {
+		return fmt.Errorf("sensitive value %s is not allowed in remote config; use an environment variable", path)
 	}
 	if err := v.Unmarshal(cfg); err != nil {
 		return fmt.Errorf("remote config: unmarshal: %w", err)

@@ -32,6 +32,10 @@ database:
 redis:
   addr: "127.0.0.1:6379"
   # password: "" # use REDIS_PASSWORD in shared configs
+  # tls:
+  #   enable: true
+  #   caFile: "/etc/ssl/certs/redis-ca.pem"
+  #   serverName: "redis.internal"
 
 jwt:
   secret: "" # use JWT_SECRET in shared configs
@@ -68,6 +72,12 @@ registry:
   checkType: http                # boot default for consul; use "ttl" to keep TTL checks
   checkPath: "/ready"            # consul readiness check path
   deregisterCriticalAfter: 300   # consul critical deregister delay in seconds
+  # tls:                         # applies to etcd/consul and remote config
+  #   enable: true
+  #   caFile: "/etc/ssl/certs/registry-ca.pem"
+  #   certFile: "/etc/ssl/certs/client.crt" # optional mTLS
+  #   keyFile: "/etc/ssl/private/client.key"
+  #   serverName: "registry.internal"
   # address: "127.0.0.1:8500"   # consul address (used when type: consul)
   # token: ""                    # consul ACL token (optional)
   # configKey: "/config/"        # enable remote config: auto key = configKey + server.name

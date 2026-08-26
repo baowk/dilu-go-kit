@@ -28,6 +28,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -239,16 +240,26 @@ func logStaleSnapshot(name string, snapshot UpstreamSnapshot) {
 
 // Config for the registry.
 type Config struct {
-	Type                    string   `mapstructure:"type"`                    // "etcd" (default) or "consul"
-	Endpoints               []string `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
-	Address                 string   `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
-	Token                   string   `mapstructure:"token"`                   // consul ACL token (optional)
-	Prefix                  string   `mapstructure:"prefix"`                  // key prefix, default "/mofang/services/"
-	TTL                     int      `mapstructure:"ttl"`                     // lease/check TTL in seconds, default 30
-	DialTimeout             int      `mapstructure:"dialTimeout"`             // dial timeout in seconds, default 5
-	CheckType               string   `mapstructure:"checkType"`               // consul check: "ttl" (default) or "http"
-	CheckPath               string   `mapstructure:"checkPath"`               // consul HTTP readiness path, default "/ready"
-	DeregisterCriticalAfter int      `mapstructure:"deregisterCriticalAfter"` // consul critical deregister delay in seconds, default 300
+	Type                    string    `mapstructure:"type"`                    // "etcd" (default) or "consul"
+	Endpoints               []string  `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
+	Address                 string    `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
+	Token                   string    `mapstructure:"token"`                   // consul ACL token (optional)
+	Prefix                  string    `mapstructure:"prefix"`                  // key prefix, default "/mofang/services/"
+	TTL                     int       `mapstructure:"ttl"`                     // lease/check TTL in seconds, default 30
+	DialTimeout             int       `mapstructure:"dialTimeout"`             // dial timeout in seconds, default 5
+	CheckType               string    `mapstructure:"checkType"`               // consul check: "ttl" (default) or "http"
+	CheckPath               string    `mapstructure:"checkPath"`               // consul HTTP readiness path, default "/ready"
+	DeregisterCriticalAfter int       `mapstructure:"deregisterCriticalAfter"` // consul critical deregister delay in seconds, default 300
+	TLS                     TLSConfig `mapstructure:"tls"`
+}
+
+// TLSConfig configures TLS for etcd or Consul transport.
+type TLSConfig struct {
+	Enable     bool   `mapstructure:"enable"`
+	CAFile     string `mapstructure:"caFile"`
+	CertFile   string `mapstructure:"certFile"`
+	KeyFile    string `mapstructure:"keyFile"`
+	ServerName string `mapstructure:"serverName"`
 }
 
 func (c *Config) consulCheckType() (string, error) {
@@ -462,6 +473,10 @@ func validateService(svc Service) error {
 	}
 	if port == "" {
 		return fmt.Errorf("registry: address %q has no port", svc.Addr)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("registry: invalid port %q", port)
 	}
 	return nil
 }

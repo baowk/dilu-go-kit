@@ -58,6 +58,9 @@ func normalizeRetryConfig(cfg RetryConfig) RetryConfig {
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = time.Second
 	}
+	if cfg.MaxBackoff < cfg.InitialBackoff {
+		cfg.MaxBackoff = cfg.InitialBackoff
+	}
 	if cfg.Multiplier <= 0 {
 		cfg.Multiplier = 2
 	}

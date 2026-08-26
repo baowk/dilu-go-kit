@@ -141,6 +141,14 @@ func TestUnmarshalBytes_invalidYaml(t *testing.T) {
 	}
 }
 
+func TestUnmarshalBytesRejectsSensitiveValues(t *testing.T) {
+	var cfg Config
+	err := unmarshalBytes([]byte("jwt:\n  secret: leaked\n"), "yaml", &cfg)
+	if err == nil || !strings.Contains(err.Error(), "jwt.secret") {
+		t.Fatalf("expected sensitive remote config error, got %v", err)
+	}
+}
+
 // ── mergeLayer (deep merge correctness) ──
 
 func TestMergeLayer_overridesOnlyPresent(t *testing.T) {

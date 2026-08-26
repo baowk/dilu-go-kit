@@ -36,7 +36,7 @@ func NewConsul(cfg Config) (Registry, error) {
 		return nil, err
 	}
 
-	probeCfg, err := consulProbeConfig(addr, cfg.Token, cfg.dialTimeout())
+	probeCfg, err := consulProbeConfigWithTLS(addr, cfg.Token, cfg.TLS, cfg.dialTimeout())
 	if err != nil {
 		return nil, fmt.Errorf("registry: consul probe client: %w", err)
 	}
@@ -50,7 +50,7 @@ func NewConsul(cfg Config) (Registry, error) {
 		return nil, fmt.Errorf("registry: consul connect: %w", err)
 	}
 
-	client, err := consul.NewClient(consulConfig(addr, cfg.Token))
+	client, err := consul.NewClient(consulConfig(addr, cfg.Token, cfg.TLS))
 	if err != nil {
 		return nil, fmt.Errorf("registry: consul client: %w", err)
 	}
@@ -63,17 +63,35 @@ func NewConsul(cfg Config) (Registry, error) {
 	}, nil
 }
 
-func consulConfig(addr, token string) *consul.Config {
+func consulConfig(addr, token string, tlsOptions ...TLSConfig) *consul.Config {
 	cfg := consul.DefaultConfig()
 	cfg.Address = addr
 	if token != "" {
 		cfg.Token = token
 	}
+	if len(tlsOptions) > 0 && tlsOptions[0].Enable {
+		tlsCfg := tlsOptions[0]
+		tlsAddress := addr
+		if tlsCfg.ServerName != "" {
+			tlsAddress = tlsCfg.ServerName
+		}
+		cfg.Scheme = "https"
+		cfg.TLSConfig = consul.TLSConfig{
+			Address:  tlsAddress,
+			CAFile:   tlsCfg.CAFile,
+			CertFile: tlsCfg.CertFile,
+			KeyFile:  tlsCfg.KeyFile,
+		}
+	}
 	return cfg
 }
 
 func consulProbeConfig(addr, token string, timeout time.Duration) (*consul.Config, error) {
-	cfg := consulConfig(addr, token)
+	return consulProbeConfigWithTLS(addr, token, TLSConfig{}, timeout)
+}
+
+func consulProbeConfigWithTLS(addr, token string, tlsOptions TLSConfig, timeout time.Duration) (*consul.Config, error) {
+	cfg := consulConfig(addr, token, tlsOptions)
 	httpClient, err := consul.NewHttpClient(cfg.Transport, cfg.TLSConfig)
 	if err != nil {
 		return nil, err
@@ -187,7 +205,7 @@ func consulServiceCheck(cfg Config, checkID, checkAddr string) (*consul.AgentSer
 	}
 	if checkType == "http" {
 		ttl := cfg.ttl()
-		check.HTTP = consulCheckURL(checkAddr, cfg.checkPath())
+		check.HTTP = consulCheckURL(checkAddr, cfg.checkPath(), cfg.TLS.Enable)
 		check.Interval = fmt.Sprintf("%ds", ttl)
 		check.Timeout = fmt.Sprintf("%ds", minInt64(5, ttl))
 		return check, false, nil
@@ -220,8 +238,12 @@ func consulRefreshInterval(ttl int64) time.Duration {
 	return interval
 }
 
-func consulCheckURL(addr, checkPath string) string {
-	u := url.URL{Scheme: "http", Host: addr, Path: checkPath}
+func consulCheckURL(addr, checkPath string, tlsEnabled ...bool) string {
+	scheme := "http"
+	if len(tlsEnabled) > 0 && tlsEnabled[0] {
+		scheme = "https"
+	}
+	u := url.URL{Scheme: scheme, Host: addr, Path: checkPath}
 	return u.String()
 }
 

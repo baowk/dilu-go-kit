@@ -56,6 +56,13 @@ func TestConsulConfigAppliesExplicitToken(t *testing.T) {
 	}
 }
 
+func TestConsulConfigEnablesTLS(t *testing.T) {
+	cfg := consulConfig("127.0.0.1:8500", "", TLSConfig{Enable: true, ServerName: "consul.internal"})
+	if cfg.Scheme != "https" || cfg.TLSConfig.Address != "consul.internal" {
+		t.Fatalf("TLS config = scheme=%q address=%q", cfg.Scheme, cfg.TLSConfig.Address)
+	}
+}
+
 func TestConsulProbeConfigSetsTimeoutBeforeClientCreation(t *testing.T) {
 	cfg, err := consulProbeConfig("127.0.0.1:8500", "", 2*time.Second)
 	if err != nil {
@@ -205,6 +212,17 @@ func TestUnmarshalService_invalid(t *testing.T) {
 	_, err := unmarshalService([]byte("not json"))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+}
+
+func TestValidateServiceRejectsInvalidPort(t *testing.T) {
+	for _, addr := range []string{"10.0.0.1:abc", "10.0.0.1:0", "10.0.0.1:65536"} {
+		t.Run(addr, func(t *testing.T) {
+			err := validateService(Service{Name: "svc", InstanceID: "inst", Addr: addr})
+			if err == nil {
+				t.Fatalf("expected invalid address %q to be rejected", addr)
+			}
+		})
 	}
 }
 

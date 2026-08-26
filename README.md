@@ -382,6 +382,9 @@ REMOTE_NODE='node-1'
 多库服务不要设置它，应使用 `DATABASE_<NAME>_DSN`（如 `DATABASE_MAIN_DSN`、
 `DATABASE_AUDIT_DSN`）逐库注入。
 
+Redis、etcd 和 Consul 跨主机部署时应启用 TLS。配置支持 `tls.enable`、`tls.caFile`、
+`tls.certFile`、`tls.keyFile` 和 `tls.serverName`；不配置 TLS 仅适合可信内网。
+
 ## 配置示例
 
 ```yaml

@@ -74,6 +74,15 @@ func TestReleaseConfigRejectsInlineSecrets(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnknownServerMode(t *testing.T) {
+	for _, mode := range []string{"prod", "release "} {
+		cfg := &Config{Server: ServerConfig{Name: "test", Addr: ":8080", Mode: mode}}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("expected server mode %q to be rejected", mode)
+		}
+	}
+}
+
 func TestLoadBaseConfigPreservesExplicitFalseBooleans(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

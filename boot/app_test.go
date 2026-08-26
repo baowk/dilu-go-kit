@@ -3,6 +3,7 @@ package boot
 import (
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -128,5 +129,24 @@ func TestEnsureOperationalRoutesKeepsExistingReady(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("/ready route count = %d", count)
+	}
+}
+
+func TestEnsureOperationalRoutesReportsNotReadyUntilReady(t *testing.T) {
+	r := gin.New()
+	ready := false
+	ensureOperationalRoutesWithReady(r, func() bool { return ready })
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d", w.Code)
+	}
+
+	ready = true
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("ready status = %d", w.Code)
 	}
 }

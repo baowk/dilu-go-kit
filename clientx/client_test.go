@@ -120,3 +120,13 @@ func TestDoRejectsNilOperation(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestNormalizeRetryConfigClampsMaxBackoff(t *testing.T) {
+	cfg := normalizeRetryConfig(RetryConfig{
+		InitialBackoff: 2 * time.Second,
+		MaxBackoff:     time.Second,
+	})
+	if cfg.MaxBackoff != cfg.InitialBackoff {
+		t.Fatalf("max backoff = %s, initial = %s", cfg.MaxBackoff, cfg.InitialBackoff)
+	}
+}

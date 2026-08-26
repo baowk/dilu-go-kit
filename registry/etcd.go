@@ -27,9 +27,14 @@ func NewEtcd(cfg Config) (Registry, error) {
 		return nil, fmt.Errorf("registry: no etcd endpoints configured")
 	}
 
+	tlsConfig, err := cfg.TLS.ClientTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("registry: etcd TLS: %w", err)
+	}
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   cfg.Endpoints,
 		DialTimeout: cfg.dialTimeout(),
+		TLS:         tlsConfig,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("registry: etcd connect: %w", err)
