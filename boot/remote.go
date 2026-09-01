@@ -20,6 +20,15 @@ import (
 // ErrRemoteConfigNotFound indicates that a remote config key is missing.
 var ErrRemoteConfigNotFound = errors.New("remote config key not found")
 
+const maxRemoteConfigBytes = 4 << 20
+
+func validateRemoteConfigPayload(data []byte) error {
+	if len(data) > maxRemoteConfigBytes {
+		return fmt.Errorf("remote config payload exceeds %d bytes", maxRemoteConfigBytes)
+	}
+	return nil
+}
+
 // ── key resolution helpers (on RegistryConfig) ──
 
 // configKeyPrefix returns the config key prefix, default "/config/".
@@ -61,8 +70,8 @@ func (r *RegistryConfig) configFormat() string {
 
 // registryType returns "etcd" (default) or "consul".
 func (r *RegistryConfig) registryType() string {
-	if r.Type != "" {
-		return r.Type
+	if value := strings.ToLower(strings.TrimSpace(r.Type)); value != "" {
+		return value
 	}
 	return "etcd"
 }
@@ -236,6 +245,8 @@ func remoteEtcdClient(reg RegistryConfig) (*clientv3.Client, error) {
 		Endpoints:   reg.Endpoints,
 		DialTimeout: 5 * time.Second,
 		TLS:         tlsConfig,
+		Username:    reg.Username,
+		Password:    reg.Password,
 	})
 }
 
@@ -256,7 +267,11 @@ func fetchEtcd(reg RegistryConfig, key string) ([]byte, error) {
 	if len(resp.Kvs) == 0 {
 		return nil, fmt.Errorf("%w: etcd key %q", ErrRemoteConfigNotFound, key)
 	}
-	return resp.Kvs[0].Value, nil
+	value := resp.Kvs[0].Value
+	if err := validateRemoteConfigPayload(value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func watchEtcd(ctx context.Context, reg RegistryConfig, key string, onChange func([]byte)) error {
@@ -279,6 +294,9 @@ func watchEtcd(ctx context.Context, reg RegistryConfig, key string, onChange fun
 			}
 			nextRevision = current.Header.Revision + 1
 			if len(current.Kvs) > 0 {
+				if err := validateRemoteConfigPayload(current.Kvs[0].Value); err != nil {
+					return err
+				}
 				onChange(current.Kvs[0].Value)
 			} else {
 				onChange(nil)
@@ -302,6 +320,9 @@ func watchEtcd(ctx context.Context, reg RegistryConfig, key string, onChange fun
 				if ev.Type == clientv3.EventTypeDelete {
 					onChange(nil)
 				} else if ev.Kv != nil {
+					if err := validateRemoteConfigPayload(ev.Kv.Value); err != nil {
+						return err
+					}
 					onChange(ev.Kv.Value)
 				}
 			}
@@ -357,6 +378,9 @@ func fetchConsul(reg RegistryConfig, key string) ([]byte, error) {
 	}
 	if pair == nil {
 		return nil, fmt.Errorf("%w: consul key %q", ErrRemoteConfigNotFound, key)
+	}
+	if err := validateRemoteConfigPayload(pair.Value); err != nil {
+		return nil, err
 	}
 	return pair.Value, nil
 }

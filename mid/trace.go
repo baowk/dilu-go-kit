@@ -4,6 +4,7 @@ import (
 	"github.com/baowk/dilu-go-kit/log"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -15,7 +16,15 @@ const (
 // stores it in the context, and sets the response header.
 func Trace() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		traceID := c.GetHeader(TraceHeader)
+		traceID := log.GetTraceID(c.Request.Context())
+		if traceID == "" {
+			if spanCtx := trace.SpanContextFromContext(c.Request.Context()); spanCtx.IsValid() {
+				traceID = spanCtx.TraceID().String()
+			}
+		}
+		if traceID == "" {
+			traceID = c.GetHeader(TraceHeader)
+		}
 		if traceID == "" {
 			traceID = c.GetHeader(RequestHeader)
 		}

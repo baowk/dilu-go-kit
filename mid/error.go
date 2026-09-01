@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/baowk/dilu-go-kit/apperr"
 	"github.com/baowk/dilu-go-kit/log"
 	"github.com/baowk/dilu-go-kit/resp"
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,8 @@ func ErrorHandler() gin.HandlerFunc {
 				switch v := r.(type) {
 				case *AppError:
 					resp.FailStatus(c, resp.HTTPStatusForCode(v.Code), v.Code, v.Msg)
+				case *apperr.Error:
+					resp.FailStatus(c, apperr.HTTPStatus(v), apperr.CodeOf(v), apperr.PublicMessage(v))
 				case string:
 					// Legacy format: "CustomError#code#msg"
 					if strings.HasPrefix(v, "CustomError#") {

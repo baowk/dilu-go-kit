@@ -9,7 +9,11 @@ server:
   idleTimeout: 60
   shutdownTimeout: 10
   maxHeaderBytes: 1048576
+  maxBodyBytes: 10485760       # request body limit (default 10 MiB)
   trustedProxies: []              # set trusted gateway CIDRs in production
+
+security:
+  requireTLS: false             # local/trusted network; set true for production
 
 # log:
 #   output: console             # "console" (default) | "file" | "both"
@@ -42,6 +46,15 @@ jwt:
   expires: 1440
   issuer: demo-auth
   audience: ["demo-service"]
+  # trustedHeaderCidrs: "10.0.0.0/8,127.0.0.1/32" # required with trustHeaderUid in production
+  # allowQueryToken: false
+
+diagnostics:
+  pprof:
+    enabled: false
+    # addr: "127.0.0.1:6060"
+    # authToken: "" # use PPROF_TOKEN in shared configs
+    # allowedCidrs: "127.0.0.1/32"
 
 cors:
   enable: true
@@ -62,6 +75,12 @@ grpc:
   enable: false
   # addr: ":9090"
   # advertiseAddr: "10.0.1.5:9090"
+  # tls:
+  #   enable: true
+  #   certFile: "/etc/ssl/certs/server.crt"
+  #   keyFile: "/etc/ssl/private/server.key"
+  #   caFile: "/etc/ssl/certs/client-ca.pem"
+  #   requireClientCert: true
 
 registry:
   enable: true

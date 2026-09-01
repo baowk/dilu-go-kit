@@ -106,7 +106,9 @@ func RunGroupConsumer(
 			return pollError{operation: "read_group", err: err}
 		}
 		if len(messages) > 0 {
-			handle(ctx, messages)
+			if err := invokeHandler(ctx, handle, messages); err != nil {
+				return pollError{operation: "handle", err: err}
+			}
 		}
 
 		if claimTicker == nil {
@@ -125,12 +127,28 @@ func RunGroupConsumer(
 			}
 			claimCursor = next
 			if len(stale) > 0 {
-				handle(ctx, stale)
+				if err := invokeHandler(ctx, handle, stale); err != nil {
+					return pollError{operation: "handle", err: err}
+				}
 			}
 		default:
 		}
 		return nil
 	})
+}
+
+func invokeHandler(ctx context.Context, handle func(context.Context, []Message), messages []Message) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = errors.New("stream: consumer handler panic")
+			kitlog.ErrorContext(ctx, "stream consumer handler panic", "panic", recovered)
+		}
+	}()
+	if len(messages) > 0 {
+		ctx = ContextForMessage(ctx, messages[0])
+	}
+	handle(ctx, messages)
+	return nil
 }
 
 func validateGroupConsumer(client redis.Cmdable, config GroupConsumerConfig, handle func(context.Context, []Message)) error {
@@ -162,14 +180,26 @@ func normalizeGroupConsumer(config GroupConsumerConfig) GroupConsumerConfig {
 	if config.ClaimInterval <= 0 {
 		config.ClaimInterval = defaultClaimInterval
 	}
+	if config.ClaimInterval > 24*time.Hour {
+		config.ClaimInterval = 24 * time.Hour
+	}
 	if config.ClaimMinIdle <= 0 {
 		config.ClaimMinIdle = defaultClaimMinIdle
+	}
+	if config.ClaimMinIdle > 24*time.Hour {
+		config.ClaimMinIdle = 24 * time.Hour
 	}
 	if config.InitialBackoff <= 0 {
 		config.InitialBackoff = defaultConsumerInitialBackoff
 	}
+	if config.InitialBackoff > 1*time.Minute {
+		config.InitialBackoff = 1 * time.Minute
+	}
 	if config.MaxBackoff <= 0 {
 		config.MaxBackoff = defaultConsumerMaxBackoff
+	}
+	if config.MaxBackoff > 10*time.Minute {
+		config.MaxBackoff = 10 * time.Minute
 	}
 	if config.MaxBackoff < config.InitialBackoff {
 		config.MaxBackoff = config.InitialBackoff

@@ -43,6 +43,8 @@ my-service/
 package main
 
 import (
+    "context"
+    "fmt"
     "log"
     "github.com/baowk/dilu-go-kit/boot"
     "github.com/baowk/dilu-go-kit/mid"
@@ -69,6 +71,14 @@ func main() {
             },
         })
         cfg := a.GetConfig()
+        // 可选：注册 DB/Redis 等依赖检查，失败时 /ready 返回 503
+        _ = a.AddReadinessCheck("postgres", func(ctx context.Context) error {
+            db := a.DB("main")
+            if db == nil { return fmt.Errorf("postgres database is not configured") }
+            sqlDB, err := db.DB()
+            if err != nil { return err }
+            return sqlDB.PingContext(ctx)
+        })
         router.Init(a.Gin, mid.JWTConfig{
             Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer,
             Audience: cfg.JWT.Audience,
@@ -88,6 +98,20 @@ server:
   # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug
 
+security:
+  requireTLS: false             # 本地/可信内网；跨网络或生产建议设为 true
+
+telemetry:
+  enabled: false                 # 开启后导出 OTLP trace；也可用 OTEL_* 环境变量
+  # endpoint: "http://127.0.0.1:4318/v1/traces"
+  sampleRatio: 0.1              # 默认 0.1；开发排障时可临时设为 1.0
+
+diagnostics:
+  pprof:
+    enabled: false               # 仅在受保护的管理端点启用
+    prefix: "/debug/pprof"
+    # addr: "127.0.0.1:6060"    # 配置后使用独立管理端口
+
 # log:                        # 默认 console 输出，可选 file / both
 #   output: both
 #   file:
@@ -106,9 +130,20 @@ database:
 redis:
   addr: "127.0.0.1:6379"
   password: ""               # 建议用 REDIS_PASSWORD 注入
+  # tls:
+  #   enable: true
+  #   caFile: "/etc/tls/redis-ca.crt"
+  #   serverName: "redis.internal"
 
 grpc:
   enable: false
+  # addr: ":9090"
+  # tls:
+  #   enable: true
+  #   certFile: "/etc/tls/server.crt"
+  #   keyFile: "/etc/tls/server.key"
+  #   caFile: "/etc/tls/client-ca.crt"
+  #   requireClientCert: true
 
 registry:
   enable: true
@@ -119,12 +154,22 @@ registry:
   checkPath: "/ready"       # consul readiness check path
   deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # configKey: "/config/"   # 启用远程配置（自动拼 server.name）
+  # tls:                     # 同时用于服务注册和远程配置
+  #   enable: true
+  #   caFile: "/etc/tls/registry-ca.crt"
+  #   serverName: "registry.internal"
 
 jwt:
   secret: ""                # 使用 JWT_SECRET 注入
   issuer: auth-service
   audience: ["my-service"]
 ```
+
+本地开发时 TLS 默认关闭，不需要证书。跨主机、跨网段或生产环境请在本地配置中设置
+`security.requireTLS: true`，并为所有启用的 Redis、注册中心和 gRPC 服务端填写对应的
+TLS 配置；否则 `boot.New` 会在启动阶段拒绝明文传输。`security.requireTLS` 是启动策略，
+不能通过远程配置热修改。指标端点默认仅允许回环地址，跨网络抓取时设置
+`METRICS_TOKEN` 或 `METRICS_ALLOWED_CIDRS`。
 
 ### 3.1 数据库迁移
 

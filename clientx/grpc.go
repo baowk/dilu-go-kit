@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/baowk/dilu-go-kit/apperr"
 	"github.com/baowk/dilu-go-kit/resp"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -22,6 +23,9 @@ func IsRetryable(err error) bool {
 	}
 	if errors.Is(err, ErrCircuitOpen) {
 		return false
+	}
+	if apperr.CodeOf(err) != 0 {
+		return apperr.Retryable(err)
 	}
 	switch status.Code(err) {
 	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted:

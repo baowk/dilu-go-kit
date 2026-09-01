@@ -10,7 +10,10 @@ import (
 
 // RetryConfig configures retry behavior for outbound service calls.
 type RetryConfig struct {
-	MaxAttempts    int
+	MaxAttempts int
+	// Budget bounds the entire retry operation, including backoff sleeps.
+	// Zero uses the caller's context without an additional deadline.
+	Budget         time.Duration
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
 	Multiplier     float64
@@ -25,7 +28,15 @@ func Do(ctx context.Context, cfg RetryConfig, fn func(context.Context) error) er
 	if fn == nil {
 		return ErrNilOperation
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cfg = normalizeRetryConfig(cfg)
+	if cfg.Budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, cfg.Budget)
+		defer cancel()
+	}
 	var last error
 	backoff := cfg.InitialBackoff
 	for attempt := 1; attempt <= cfg.MaxAttempts; attempt++ {
@@ -52,17 +63,29 @@ func normalizeRetryConfig(cfg RetryConfig) RetryConfig {
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 3
 	}
+	if cfg.MaxAttempts > 5 {
+		cfg.MaxAttempts = 5
+	}
 	if cfg.InitialBackoff <= 0 {
 		cfg.InitialBackoff = 100 * time.Millisecond
 	}
+	if cfg.InitialBackoff > 1*time.Minute {
+		cfg.InitialBackoff = 1 * time.Minute
+	}
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = time.Second
+	}
+	if cfg.MaxBackoff > 5*time.Minute {
+		cfg.MaxBackoff = 5 * time.Minute
 	}
 	if cfg.MaxBackoff < cfg.InitialBackoff {
 		cfg.MaxBackoff = cfg.InitialBackoff
 	}
 	if cfg.Multiplier <= 0 {
 		cfg.Multiplier = 2
+	}
+	if cfg.Multiplier > 10 {
+		cfg.Multiplier = 10
 	}
 	if cfg.Retryable == nil {
 		cfg.Retryable = IsRetryable
@@ -77,6 +100,9 @@ func normalizeRetryConfig(cfg RetryConfig) RetryConfig {
 	}
 	if cfg.JitterFraction > 1 {
 		cfg.JitterFraction = 1
+	}
+	if cfg.Budget < 0 {
+		cfg.Budget = 0
 	}
 	return cfg
 }

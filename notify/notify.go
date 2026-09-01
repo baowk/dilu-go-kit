@@ -45,7 +45,7 @@ func New(cfg Config) (*Notifier, error) {
 		return nil, fmt.Errorf("notify: empty base URL")
 	}
 	parsed, err := url.Parse(baseURL)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("notify: invalid base URL %q", cfg.BaseURL)
 	}
 	client := cfg.Client
@@ -69,7 +69,9 @@ func Init(wsBaseURL string) {
 		return
 	}
 	global.Store(n)
-	log.Info("notifier initialized", "target", wsBaseURL)
+	if parsed, err := url.Parse(wsBaseURL); err == nil {
+		log.Info("notifier initialized", "target", parsed.Scheme+"://"+parsed.Host+parsed.Path)
+	}
 }
 
 // InitConfig initializes the global notifier with authentication or a custom client.
@@ -155,7 +157,7 @@ func (n *Notifier) SendContext(ctx context.Context, resource string, payload any
 		return fmt.Errorf("notify: send: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.CopyN(io.Discard, resp.Body, 1<<20)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("notify: unexpected HTTP status %d", resp.StatusCode)

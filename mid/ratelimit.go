@@ -15,12 +15,13 @@ import (
 // the current process only; use a shared backend for global multi-instance
 // limits.
 type RateLimiter struct {
-	max       int
-	window    time.Duration
-	shards    [rateLimiterShardCount]rateLimiterShard
-	stop      chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
+	max        int
+	window     time.Duration
+	shards     [rateLimiterShardCount]rateLimiterShard
+	stop       chan struct{}
+	done       chan struct{}
+	closeOnce  sync.Once
+	maxClients int
 }
 
 const rateLimiterShardCount = 64
@@ -37,6 +38,10 @@ type rateEntry struct {
 
 // NewRateLimiter creates a closeable in-memory rate limiter.
 func NewRateLimiter(max int, window time.Duration) *RateLimiter {
+	return newRateLimiter(max, window, true)
+}
+
+func newRateLimiter(max int, window time.Duration, cleanup bool) *RateLimiter {
 	if max <= 0 {
 		max = 1
 	}
@@ -44,15 +49,20 @@ func NewRateLimiter(max int, window time.Duration) *RateLimiter {
 		window = time.Second
 	}
 	rl := &RateLimiter{
-		max:    max,
-		window: window,
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		max:        max,
+		window:     window,
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
+		maxClients: 100_000,
 	}
 	for i := range rl.shards {
 		rl.shards[i].clients = make(map[string]*rateEntry)
 	}
-	go rl.cleanupLoop()
+	if cleanup {
+		go rl.cleanupLoop()
+	} else {
+		close(rl.done)
+	}
 	return rl
 }
 
@@ -60,7 +70,9 @@ func NewRateLimiter(max int, window time.Duration) *RateLimiter {
 // max requests per window per client IP. For explicit lifecycle management,
 // use NewRateLimiter and call Close during shutdown.
 func RateLimit(max int, window time.Duration) gin.HandlerFunc {
-	return NewRateLimiter(max, window).Middleware()
+	// The convenience API cannot expose a lifecycle hook. Use bounded
+	// opportunistic eviction instead of leaking a cleanup goroutine.
+	return newRateLimiter(max, window, false).Middleware()
 }
 
 // Middleware returns the Gin middleware for the limiter.
@@ -72,6 +84,19 @@ func (l *RateLimiter) Middleware() gin.HandlerFunc {
 		e, ok := shard.clients[ip]
 		now := time.Now()
 		if !ok || now.After(e.resetAt) {
+			if !ok && l.maxClients > 0 && len(shard.clients) >= l.maxClients/rateLimiterShardCount+1 {
+				for key, entry := range shard.clients {
+					if now.After(entry.resetAt) {
+						delete(shard.clients, key)
+					}
+				}
+				if len(shard.clients) >= l.maxClients/rateLimiterShardCount+1 {
+					shard.mu.Unlock()
+					resp.FailStatus(c, 429, 42902, "客户端数量过多")
+					c.Abort()
+					return
+				}
+			}
 			e = &rateEntry{count: 0, resetAt: now.Add(l.window)}
 			shard.clients[ip] = e
 		}

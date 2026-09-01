@@ -2,11 +2,14 @@ package mid
 
 import (
 	"context"
+	"runtime/debug"
 
 	"github.com/baowk/dilu-go-kit/log"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 const (
@@ -54,6 +57,34 @@ func GRPCStreamServerInterceptor() grpc.StreamServerInterceptor {
 		ctx := extractTraceFromMetadata(ss.Context())
 		wrapped := &wrappedStream{ServerStream: ss, ctx: ctx}
 		return handler(srv, wrapped)
+	}
+}
+
+// GRPCRecoveryUnaryInterceptor prevents a handler panic from taking down the
+// process and converts it to a generic Internal status.
+func GRPCRecoveryUnaryInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.ErrorContext(ctx, "grpc panic recovered", "method", info.FullMethod, "panic", recovered, "stack", string(debug.Stack()))
+				err = status.Error(codes.Internal, "internal server error")
+			}
+		}()
+		return handler(ctx, req)
+	}
+}
+
+// GRPCRecoveryStreamInterceptor is the streaming equivalent of
+// GRPCRecoveryUnaryInterceptor.
+func GRPCRecoveryStreamInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, stream grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.ErrorContext(stream.Context(), "grpc stream panic recovered", "method", info.FullMethod, "panic", recovered, "stack", string(debug.Stack()))
+				err = status.Error(codes.Internal, "internal server error")
+			}
+		}()
+		return handler(srv, stream)
 	}
 }
 

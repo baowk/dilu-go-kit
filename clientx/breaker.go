@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/baowk/dilu-go-kit/metrics"
 )
 
 var ErrCircuitOpen = errors.New("circuit breaker open")
@@ -30,10 +32,12 @@ type Breaker struct {
 	shouldCount   func(error) bool
 	halfOpenProbe bool
 	generation    uint64
+	name          string
 }
 
 // BreakerConfig configures a circuit breaker.
 type BreakerConfig struct {
+	Name             string
 	FailureThreshold int
 	Cooldown         time.Duration
 	Now              func() time.Time
@@ -56,15 +60,25 @@ func NewBreaker(cfg BreakerConfig) *Breaker {
 	}
 	shouldCount := cfg.ShouldCount
 	if shouldCount == nil {
-		shouldCount = func(err error) bool { return err != nil }
+		shouldCount = func(err error) bool {
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return false
+			}
+			return true
+		}
 	}
-	return &Breaker{threshold: threshold, cooldown: cooldown, now: now, shouldCount: shouldCount}
+	b := &Breaker{name: cfg.Name, threshold: threshold, cooldown: cooldown, now: now, shouldCount: shouldCount}
+	metrics.ObserveCircuitBreaker(b.name, "closed")
+	return b
 }
 
 // Do executes fn when the circuit allows it.
 func (b *Breaker) Do(ctx context.Context, fn func(context.Context) error) error {
 	if fn == nil {
 		return ErrNilOperation
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -119,11 +133,13 @@ func (b *Breaker) after(permit breakerPermit, err error) {
 			b.failures = 0
 			b.state = BreakerClosed
 			b.generation++
+			metrics.ObserveCircuitBreaker(b.name, "closed")
 			return
 		}
 		b.state = BreakerOpen
 		b.openUntil = b.now().Add(b.cooldown)
 		b.generation++
+		metrics.ObserveCircuitBreaker(b.name, "open")
 		return
 	}
 	if b.state != BreakerClosed {
@@ -142,6 +158,7 @@ func (b *Breaker) after(permit breakerPermit, err error) {
 		b.state = BreakerOpen
 		b.openUntil = b.now().Add(b.cooldown)
 		b.generation++
+		metrics.ObserveCircuitBreaker(b.name, "open")
 	}
 }
 

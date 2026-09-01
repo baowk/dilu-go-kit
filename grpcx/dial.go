@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/mid"
+	"github.com/baowk/dilu-go-kit/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
@@ -36,6 +37,9 @@ type DialOption struct {
 	TLSConfig *tls.Config
 	// TransportCredentials overrides TLSConfig/insecure credentials.
 	TransportCredentials credentials.TransportCredentials
+	// RequireTLS rejects dialing with insecure credentials when true. This is
+	// useful for callers that derive transport policy from boot.SecurityConfig.
+	RequireTLS bool
 	// RetryMaxAttempts is the gRPC retry max attempts (default 1, disabled).
 	RetryMaxAttempts int
 	// RetryMethods contains explicitly idempotent full method names, for example
@@ -47,6 +51,8 @@ type DialOption struct {
 	RetryMaxBackoff time.Duration
 	// RetryBackoffMultiplier is the retry backoff multiplier (default 2).
 	RetryBackoffMultiplier float64
+	// Telemetry adds an OpenTelemetry client stats handler when non-nil.
+	Telemetry *telemetry.Provider
 }
 
 var defaultOpts = DialOption{
@@ -74,6 +80,9 @@ func Dial(addr string, opts ...DialOption) (*grpc.ClientConn, error) {
 
 // DialContext creates a connection and waits until it is ready or ctx expires.
 func DialContext(ctx context.Context, addr string, opts ...DialOption) (*grpc.ClientConn, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	opt := normalizeDialOption(opts...)
 	if opt.Timeout > 0 {
 		var cancel context.CancelFunc
@@ -95,7 +104,7 @@ func dialContext(ctx context.Context, addr string, opt DialOption) (*grpc.Client
 		return nil, err
 	}
 
-	conn, err := grpc.NewClient(addr,
+	grpcOptions := []grpc.DialOption{
 		grpc.WithTransportCredentials(opt.transportCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                opt.KeepaliveTime,
@@ -105,7 +114,11 @@ func dialContext(ctx context.Context, addr string, opt DialOption) (*grpc.Client
 		grpc.WithDefaultServiceConfig(serviceConfig),
 		grpc.WithChainUnaryInterceptor(mid.GRPCUnaryClientInterceptor()),
 		grpc.WithChainStreamInterceptor(mid.GRPCStreamClientInterceptor()),
-	)
+	}
+	if opt.Telemetry != nil {
+		grpcOptions = append(grpcOptions, opt.Telemetry.GRPCDialOption())
+	}
+	conn, err := grpc.NewClient(addr, grpcOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +236,17 @@ func (o DialOption) validate() error {
 	}
 	if o.RetryInitialBackoff <= 0 || o.RetryMaxBackoff <= 0 || o.RetryBackoffMultiplier <= 0 {
 		return fmt.Errorf("grpcx: retry backoff values must be positive")
+	}
+	if o.RequireTLS && o.TLSConfig == nil && o.TransportCredentials == nil {
+		return fmt.Errorf("grpcx: TLS credentials are required")
+	}
+	if o.RequireTLS && o.TLSConfig != nil && o.TLSConfig.InsecureSkipVerify {
+		return fmt.Errorf("grpcx: insecure TLS verification is not allowed when TLS is required")
+	}
+	if o.RequireTLS && o.TransportCredentials != nil {
+		if info := o.TransportCredentials.Info(); strings.EqualFold(info.SecurityProtocol, "insecure") {
+			return fmt.Errorf("grpcx: insecure transport credentials are not allowed when TLS is required")
+		}
 	}
 	return nil
 }

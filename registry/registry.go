@@ -244,6 +244,8 @@ type Config struct {
 	Endpoints               []string  `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
 	Address                 string    `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
 	Token                   string    `mapstructure:"token"`                   // consul ACL token (optional)
+	Username                string    `mapstructure:"username"`                // etcd auth username (optional)
+	Password                string    `mapstructure:"password"`                // etcd auth password (optional)
 	Prefix                  string    `mapstructure:"prefix"`                  // key prefix, default "/mofang/services/"
 	TTL                     int       `mapstructure:"ttl"`                     // lease/check TTL in seconds, default 30
 	DialTimeout             int       `mapstructure:"dialTimeout"`             // dial timeout in seconds, default 5
@@ -274,8 +276,8 @@ func (c *Config) consulCheckType() (string, error) {
 }
 
 func (c *Config) registryType() string {
-	if c.Type != "" {
-		return c.Type
+	if value := strings.ToLower(strings.TrimSpace(c.Type)); value != "" {
+		return value
 	}
 	return "etcd"
 }
@@ -293,8 +295,11 @@ func New(cfg Config) (Registry, error) {
 }
 
 func (c *Config) prefix() string {
-	if c.Prefix != "" {
-		return strings.TrimRight(c.Prefix, "/") + "/"
+	if value := strings.TrimSpace(c.Prefix); value != "" {
+		if len(value) > 256 || strings.ContainsAny(value, "\r\n\x00") {
+			return "/mofang/services/"
+		}
+		return strings.TrimRight(value, "/") + "/"
 	}
 	return "/mofang/services/"
 }
@@ -461,10 +466,10 @@ func GenerateInstanceID(name string) string {
 }
 
 func validateService(svc Service) error {
-	if svc.Name == "" || strings.Contains(svc.Name, "/") {
+	if svc.Name == "" || len(svc.Name) > 128 || strings.Contains(svc.Name, "/") || strings.ContainsAny(svc.Name, "\r\n\x00") {
 		return fmt.Errorf("registry: invalid service name %q", svc.Name)
 	}
-	if svc.InstanceID == "" || strings.Contains(svc.InstanceID, "/") {
+	if svc.InstanceID == "" || len(svc.InstanceID) > 256 || strings.Contains(svc.InstanceID, "/") || strings.ContainsAny(svc.InstanceID, "\r\n\x00") {
 		return fmt.Errorf("registry: invalid instance ID %q", svc.InstanceID)
 	}
 	_, port, err := net.SplitHostPort(svc.Addr)

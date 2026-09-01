@@ -9,6 +9,11 @@ package metrics
 
 import (
 	"context"
+	"crypto/subtle"
+	"database/sql"
+	"net"
+	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,13 +28,17 @@ import (
 )
 
 var (
-	httpRequestsTotal    *prometheus.CounterVec
-	httpRequestDuration  *prometheus.HistogramVec
-	httpRequestsInFlight *prometheus.GaugeVec
-	grpcRequestsTotal    *prometheus.CounterVec
-	grpcRequestDuration  *prometheus.HistogramVec
-	collectorsOnce       sync.Once
-	currentServiceName   atomic.Pointer[string]
+	httpRequestsTotal         *prometheus.CounterVec
+	httpRequestDuration       *prometheus.HistogramVec
+	httpRequestsInFlight      *prometheus.GaugeVec
+	grpcRequestsTotal         *prometheus.CounterVec
+	grpcRequestDuration       *prometheus.HistogramVec
+	dependencyRequestsTotal   *prometheus.CounterVec
+	dependencyRequestDuration *prometheus.HistogramVec
+	circuitBreakerState       *prometheus.GaugeVec
+	dbPoolStats               *prometheus.GaugeVec
+	collectorsOnce            sync.Once
+	currentServiceName        atomic.Pointer[string]
 )
 
 // Init sets the service label used by subsequent observations and ensures the
@@ -39,6 +48,7 @@ func Init(serviceName string) {
 	if serviceName == "" {
 		serviceName = "unknown"
 	}
+	serviceName = boundedLabel(serviceName)
 	currentServiceName.Store(&serviceName)
 	ensureCollectors()
 }
@@ -76,12 +86,79 @@ func initMetrics() {
 		prometheus.HistogramOpts{Name: "grpc_server_request_duration_seconds", Help: "gRPC server request duration in seconds"},
 		[]string{"service", "method"},
 	)
+	dependencyRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "dependency_requests_total", Help: "Total outbound dependency requests"},
+		[]string{"service", "dependency", "operation", "status"},
+	)
+	dependencyRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{Name: "dependency_request_duration_seconds", Help: "Outbound dependency request duration in seconds"},
+		[]string{"service", "dependency", "operation"},
+	)
+	circuitBreakerState = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "circuit_breaker_state", Help: "Current circuit breaker state (one active state is 1)"},
+		[]string{"service", "breaker", "state"},
+	)
+	dbPoolStats = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{Name: "db_pool_stats", Help: "Current database connection pool statistics"},
+		[]string{"service", "database", "state"},
+	)
 
-	prometheus.MustRegister(httpRequestsTotal, httpRequestDuration, httpRequestsInFlight, grpcRequestsTotal, grpcRequestDuration)
+	prometheus.MustRegister(httpRequestsTotal, httpRequestDuration, httpRequestsInFlight, grpcRequestsTotal, grpcRequestDuration, dependencyRequestsTotal, dependencyRequestDuration, circuitBreakerState, dbPoolStats)
 }
 
 func ensureCollectors() {
 	collectorsOnce.Do(initMetrics)
+}
+
+// ObserveDependency records an outbound dependency call. Status should be a
+// stable class or code (for example "ok", "timeout", or "503").
+func ObserveDependency(dependency, operation, status string, duration time.Duration) {
+	ensureCollectors()
+	if dependency == "" {
+		dependency = "unknown"
+	}
+	if operation == "" {
+		operation = "unknown"
+	}
+	if status == "" {
+		status = "error"
+	}
+	if duration < 0 {
+		duration = 0
+	}
+	dependencyRequestsTotal.WithLabelValues(serviceName(), boundedLabel(dependency), boundedLabel(operation), boundedLabel(status)).Inc()
+	dependencyRequestDuration.WithLabelValues(serviceName(), boundedLabel(dependency), boundedLabel(operation)).Observe(duration.Seconds())
+}
+
+// ObserveCircuitBreaker publishes the current state of one breaker.
+func ObserveCircuitBreaker(name, state string) {
+	ensureCollectors()
+	if name == "" {
+		name = "default"
+	}
+	for _, candidate := range []string{"closed", "open", "half_open"} {
+		value := 0.0
+		if candidate == state {
+			value = 1
+		}
+		circuitBreakerState.WithLabelValues(serviceName(), boundedLabel(name), candidate).Set(value)
+	}
+}
+
+// ObserveDBPool records a database/sql connection pool snapshot.
+func ObserveDBPool(name string, stats sql.DBStats) {
+	ensureCollectors()
+	if name == "" {
+		name = "default"
+	}
+	values := map[string]float64{
+		"open": float64(stats.OpenConnections), "in_use": float64(stats.InUse),
+		"idle": float64(stats.Idle), "wait_count": float64(stats.WaitCount),
+		"wait_duration_seconds": stats.WaitDuration.Seconds(),
+	}
+	for state, value := range values {
+		dbPoolStats.WithLabelValues(serviceName(), boundedLabel(name), state).Set(value)
+	}
 }
 
 func serviceName() string {
@@ -112,8 +189,8 @@ func GinMiddleware() gin.HandlerFunc {
 			if path == "" {
 				path = "unknown"
 			}
-			httpRequestsTotal.WithLabelValues(service, c.Request.Method, path, statusCode).Inc()
-			httpRequestDuration.WithLabelValues(service, c.Request.Method, path).Observe(duration)
+			httpRequestsTotal.WithLabelValues(service, boundedLabel(c.Request.Method), boundedLabel(path), boundedLabel(statusCode)).Inc()
+			httpRequestDuration.WithLabelValues(service, boundedLabel(c.Request.Method), boundedLabel(path)).Observe(duration)
 		}()
 		c.Next()
 	}
@@ -123,11 +200,79 @@ func GinMiddleware() gin.HandlerFunc {
 //
 //	r.GET("/metrics", metrics.Handler())
 func Handler() gin.HandlerFunc {
+	return HandlerFromEnv()
+}
+
+// HandlerWithAccess serves metrics with optional bearer-token and source-CIDR
+// protection. Metrics commonly contain operational details and should not be
+// exposed on a public listener without one of these controls.
+func HandlerWithAccess(token string, allowedCIDRs []string) gin.HandlerFunc {
 	ensureCollectors()
 	h := promhttp.Handler()
 	return func(c *gin.Context) {
+		if !metricsAccessAllowed(c.Request, token, allowedCIDRs) {
+			c.AbortWithStatus(http.StatusForbidden)
+			return
+		}
 		h.ServeHTTP(c.Writer, c.Request)
 	}
+}
+
+// HandlerFromEnv is a convenience for services that keep metrics on their
+// normal listener. It reads METRICS_TOKEN and METRICS_ALLOWED_CIDRS at startup.
+func HandlerFromEnv() gin.HandlerFunc {
+	token := strings.TrimSpace(os.Getenv("METRICS_TOKEN"))
+	cidrs := splitCIDRs(os.Getenv("METRICS_ALLOWED_CIDRS"))
+	if token == "" && len(cidrs) == 0 {
+		// Safe default for services that accidentally expose /metrics on their
+		// public listener. Prometheus deployments should explicitly set either
+		// METRICS_TOKEN or METRICS_ALLOWED_CIDRS.
+		cidrs = []string{"127.0.0.0/8", "::1/128"}
+	}
+	return HandlerWithAccess(token, cidrs)
+}
+
+func splitCIDRs(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func metricsAccessAllowed(r *http.Request, token string, allowedCIDRs []string) bool {
+	if token != "" {
+		value := strings.TrimSpace(r.Header.Get("Authorization"))
+		const prefix = "Bearer "
+		if len(value) < len(prefix) || !strings.EqualFold(value[:len(prefix)], prefix) {
+			return false
+		}
+		got := strings.TrimSpace(value[len(prefix):])
+		if len(got) != len(token) || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
+			return false
+		}
+	}
+	if len(allowedCIDRs) == 0 {
+		return true
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, value := range allowedCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(value))
+		if err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // GRPCUnaryServerInterceptor records unary gRPC latency and status codes.
@@ -137,8 +282,8 @@ func GRPCUnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		start := time.Now()
 		resp, err := handler(ctx, req)
 		service := serviceName()
-		grpcRequestsTotal.WithLabelValues(service, info.FullMethod, status.Code(err).String()).Inc()
-		grpcRequestDuration.WithLabelValues(service, info.FullMethod).Observe(time.Since(start).Seconds())
+		grpcRequestsTotal.WithLabelValues(service, boundedLabel(info.FullMethod), status.Code(err).String()).Inc()
+		grpcRequestDuration.WithLabelValues(service, boundedLabel(info.FullMethod)).Observe(time.Since(start).Seconds())
 		return resp, err
 	}
 }
@@ -150,8 +295,19 @@ func GRPCStreamServerInterceptor() grpc.StreamServerInterceptor {
 		start := time.Now()
 		err := handler(srv, stream)
 		service := serviceName()
-		grpcRequestsTotal.WithLabelValues(service, info.FullMethod, status.Code(err).String()).Inc()
-		grpcRequestDuration.WithLabelValues(service, info.FullMethod).Observe(time.Since(start).Seconds())
+		grpcRequestsTotal.WithLabelValues(service, boundedLabel(info.FullMethod), status.Code(err).String()).Inc()
+		grpcRequestDuration.WithLabelValues(service, boundedLabel(info.FullMethod)).Observe(time.Since(start).Seconds())
 		return err
 	}
+}
+
+func boundedLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	if len(value) > 128 {
+		return value[:128]
+	}
+	return value
 }

@@ -19,6 +19,7 @@ type consulRegistry struct {
 	client  *consul.Client
 	cfg     Config
 	mu      sync.Mutex
+	wg      sync.WaitGroup
 	checks  map[string]string             // instanceID → checkID
 	cancels map[string]context.CancelFunc // instanceID → TTL refresh cancel
 }
@@ -82,6 +83,10 @@ func consulConfig(addr, token string, tlsOptions ...TLSConfig) *consul.Config {
 			CertFile: tlsCfg.CertFile,
 			KeyFile:  tlsCfg.KeyFile,
 		}
+	}
+	if httpClient, err := consul.NewHttpClient(cfg.Transport, cfg.TLSConfig); err == nil {
+		httpClient.Timeout = 5 * time.Second
+		cfg.HttpClient = httpClient
 	}
 	return cfg
 }
@@ -175,7 +180,8 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		oldCancel()
 	}
 	if ttlCancel != nil {
-		go r.refreshTTL(ttlCtx, svc, checkID, ttl)
+		r.wg.Add(1)
+		go func() { defer r.wg.Done(); r.refreshTTL(ttlCtx, svc, checkID, ttl) }()
 	}
 	checkType := "http"
 	if usesTTL {
@@ -423,6 +429,7 @@ func (r *consulRegistry) Close() error {
 	checks := r.checks
 	r.checks = make(map[string]string)
 	r.mu.Unlock()
+	r.wg.Wait()
 
 	for instanceID, checkID := range checks {
 		_ = r.client.Agent().ServiceDeregister(instanceID)

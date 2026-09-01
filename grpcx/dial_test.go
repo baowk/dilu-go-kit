@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestNormalizeDialOptionDefaults(t *testing.T) {
@@ -52,6 +53,43 @@ func TestTransportCredentialsTLS(t *testing.T) {
 	creds := DialOption{TLSConfig: &tls.Config{ServerName: "example.com"}}.transportCredentials()
 	if got := creds.Info().SecurityProtocol; got != "tls" {
 		t.Fatalf("SecurityProtocol = %q", got)
+	}
+}
+
+func TestRequireTLSRejectsMissingCredentials(t *testing.T) {
+	opt := normalizeDialOption(DialOption{RequireTLS: true})
+	if err := opt.validate(); err == nil {
+		t.Fatal("expected missing TLS credentials to be rejected")
+	}
+}
+
+func TestRequireTLSRejectsExplicitInsecureCredentials(t *testing.T) {
+	opt := normalizeDialOption(DialOption{
+		RequireTLS:           true,
+		TransportCredentials: insecure.NewCredentials(),
+	})
+	if err := opt.validate(); err == nil {
+		t.Fatal("expected insecure credentials to be rejected")
+	}
+}
+
+func TestRequireTLSRejectsInsecureSkipVerify(t *testing.T) {
+	opt := normalizeDialOption(DialOption{
+		RequireTLS: true,
+		TLSConfig:  &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // explicitly testing validation
+	})
+	if err := opt.validate(); err == nil {
+		t.Fatal("expected insecure TLS verification to be rejected")
+	}
+}
+
+func TestRequireTLSAcceptsTLSCredentials(t *testing.T) {
+	opt := normalizeDialOption(DialOption{
+		RequireTLS: true,
+		TLSConfig:  &tls.Config{ServerName: "example.com"},
+	})
+	if err := opt.validate(); err != nil {
+		t.Fatalf("TLS credentials rejected: %v", err)
 	}
 }
 

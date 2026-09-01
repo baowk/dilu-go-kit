@@ -360,7 +360,11 @@ server:
   idleTimeout: 60
   shutdownTimeout: 10
   maxHeaderBytes: 1048576
+  maxBodyBytes: 10485760       # 请求体上限，默认 10 MiB
   trustedProxies: []      # 仅配置可信反向代理 CIDR
+
+security:
+  requireTLS: false       # 本地/可信内网；跨网络或生产建议设为 true
 
 log:
   output: console           # console（默认）/ file / both
@@ -387,11 +391,21 @@ redis:
   username: ""              # Redis 6+ ACL 用户名（可选）
   password: ""              # 建议用 REDIS_PASSWORD 注入
   db: 0
+  # tls:
+  #   enable: true
+  #   caFile: "/etc/tls/redis-ca.crt"
+  #   serverName: "redis.internal"
 
 grpc:
   enable: false
   addr: ":9090"              # 监听地址
   # advertiseAddr: "10.0.1.5:9090" # 注册发现地址；空时从 addr 推断
+  # tls:
+  #   enable: true
+  #   certFile: "/etc/tls/server.crt"
+  #   keyFile: "/etc/tls/server.key"
+  #   caFile: "/etc/tls/client-ca.crt"
+  #   requireClientCert: true
 
 jwt:
   secret: ""                # 建议用 JWT_SECRET 注入
@@ -399,6 +413,16 @@ jwt:
   refresh: 30             # 自动刷新窗口，分钟
   issuer: auth-service
   audience: ["my-service"]
+  # trustHeaderUid: true 时必须限制来源：
+  # trustedHeaderCidrs: "10.0.0.0/8,127.0.0.1/32"
+  # allowQueryToken: false     # WebSocket URL token 兼容开关，默认关闭
+
+diagnostics:
+  pprof:
+    enabled: false
+    # addr: "127.0.0.1:6060"
+    # authToken: ""             # 使用 PPROF_TOKEN 注入
+    # allowedCidrs: "127.0.0.1/32"
 
 cors:
   enable: true
@@ -433,7 +457,22 @@ registry:
   configKey: "/config/"     # 有值即启用远程配置（自动拼 server.name）
   # configNode: "node-1"   # 节点级覆盖（可选，或 env REMOTE_NODE）
   # configFormat: yaml      # yaml（默认）/ json
+  # tls:                    # 同时用于服务注册和远程配置
+  #   enable: true
+  #   caFile: "/etc/tls/registry-ca.crt"
+  #   serverName: "registry.internal"
 ```
+
+### 传输安全策略
+
+`redis.tls`、`registry.tls` 和 `grpc.tls` 默认关闭，便于本地回环开发；本地不需要准备证书。
+跨主机、跨网段或生产部署应在本地配置中设置 `security.requireTLS: true`，框架会在启动时
+拒绝任何已启用但仍使用明文的 Redis、注册中心或 gRPC 传输。该字段属于启动策略，不能通过
+远程配置热修改；调整后必须重启服务。gRPC 服务端启用 TLS 时必须提供 `certFile` 和 `keyFile`，
+启用 `requireClientCert` 时还必须提供客户端 CA (`caFile`)。
+
+`metrics.Handler()` 默认只允许回环地址抓取；跨网络暴露指标时必须设置
+`METRICS_TOKEN` 或 `METRICS_ALLOWED_CIDRS`，并建议将指标放在独立管理网络或端口。
 
 ### 扩展配置
 
@@ -505,7 +544,7 @@ registry:
 ### 热更新
 
 运行时自动 watch 远程 key（etcd 实时推送，consul long-poll）。仅
-`jwt/cors/accessLimit/notify` 等动态字段允许发布，并由 `OnConfigApplied` 应用；`server/log/database/redis/grpc/registry`
+`jwt/cors/accessLimit/notify` 等动态字段允许发布，并由 `OnConfigApplied` 应用；`server/log/database/redis/grpc/registry/security`
 属于启动字段，修改会被拒绝并要求重启。
 
 ```go
@@ -554,6 +593,10 @@ YAML 内联敏感值，远程配置在所有模式都会拒绝 DSN/password/secr
 | `SERVER_ADDR` / `SERVER_ADVERTISE_ADDR` | `server.addr/advertiseAddr` |
 | `GRPC_ADDR` / `GRPC_ADVERTISE_ADDR` | `grpc.addr/advertiseAddr` |
 | `REMOTE_NODE` | `registry.configNode` |
+| `REQUIRE_TLS` | `security.requireTLS` |
+
+指标端点不把 token 放入 `boot.Config`，请使用 `METRICS_TOKEN` 或
+`METRICS_ALLOWED_CIDRS` 环境变量配置抓取访问控制。
 
 `DATABASE_DSN` 会覆盖所有数据库。多库服务不要设置它，应只使用
 `DATABASE_<NAME>_DSN` 逐库注入。

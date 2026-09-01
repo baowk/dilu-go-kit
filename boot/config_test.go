@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,7 @@ func TestApplyEnvOverridesSecrets(t *testing.T) {
 	t.Setenv("GRPC_ADDR", ":9002")
 	t.Setenv("GRPC_ADVERTISE_ADDR", "10.0.1.5:9002")
 	t.Setenv("REMOTE_NODE", "node-a")
+	t.Setenv("REQUIRE_TLS", "true")
 
 	cfg := &Config{
 		Database: map[string]DatabaseConfig{
@@ -62,6 +64,94 @@ func TestApplyEnvOverridesSecrets(t *testing.T) {
 	if cfg.Registry.ConfigNode != "node-a" {
 		t.Fatalf("config node = %q", cfg.Registry.ConfigNode)
 	}
+	if !cfg.Security.RequireTLS {
+		t.Fatal("REQUIRE_TLS env override was not applied")
+	}
+}
+
+func TestValidateAllowsLocalPlaintextTransportsByDefault(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Name: "local", Addr: ":8080"},
+		Redis:  RedisConfig{Addr: "127.0.0.1:6379"},
+		GRPC:   GRPCConfig{Enable: true, Addr: ":9090"},
+		Registry: RegistryConfig{
+			Enable:    true,
+			Endpoints: []string{"127.0.0.1:2379"},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("local plaintext config should be valid: %v", err)
+	}
+}
+
+func TestValidateRequireTLSRejectsPlaintextTransports(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{
+			name: "redis",
+			cfg: Config{
+				Server:   ServerConfig{Name: "svc", Addr: ":8080"},
+				Security: SecurityConfig{RequireTLS: true},
+				Redis:    RedisConfig{Addr: "redis.internal:6379"},
+			},
+			want: "redis.tls.enable",
+		},
+		{
+			name: "registry",
+			cfg: Config{
+				Server:   ServerConfig{Name: "svc", Addr: ":8080"},
+				Security: SecurityConfig{RequireTLS: true},
+				Registry: RegistryConfig{Enable: true, Endpoints: []string{"registry.internal:2379"}},
+			},
+			want: "registry.tls.enable",
+		},
+		{
+			name: "remote config registry",
+			cfg: Config{
+				Server:   ServerConfig{Name: "svc", Addr: ":8080"},
+				Security: SecurityConfig{RequireTLS: true},
+				Registry: RegistryConfig{ConfigKey: "/config/", Endpoints: []string{"registry.internal:2379"}},
+			},
+			want: "registry.tls.enable",
+		},
+		{
+			name: "grpc",
+			cfg: Config{
+				Server:   ServerConfig{Name: "svc", Addr: ":8080"},
+				Security: SecurityConfig{RequireTLS: true},
+				GRPC:     GRPCConfig{Enable: true, Addr: ":9090"},
+			},
+			want: "grpc.tls.enable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate error = %v, want substring %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateGRPCTLSRequiresCertificates(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Name: "svc", Addr: ":8080"},
+		GRPC:   GRPCConfig{Enable: true, Addr: ":9090", TLS: TLSConfig{Enable: true}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "grpc.tls certFile and keyFile") {
+		t.Fatalf("Validate error = %v", err)
+	}
+
+	cfg.GRPC.TLS.CertFile = "server.crt"
+	cfg.GRPC.TLS.KeyFile = "server.key"
+	cfg.GRPC.TLS.RequireClientCert = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "grpc.tls caFile") {
+		t.Fatalf("Validate mTLS error = %v", err)
+	}
 }
 
 func TestReleaseConfigRejectsInlineSecrets(t *testing.T) {
@@ -97,6 +187,22 @@ func TestLoadBaseConfigPreservesExplicitFalseBooleans(t *testing.T) {
 	db := cfg.Database["main"]
 	if db.PingOnOpen == nil || *db.PingOnOpen || db.PrepareStmt == nil || *db.PrepareStmt {
 		t.Fatalf("explicit false values were lost: %+v", db)
+	}
+}
+
+func TestLoadBaseConfigReadsRequireTLS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := "server:\n  name: test\n  addr: ':8080'\nsecurity:\n  requireTLS: true\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadBaseConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Security.RequireTLS {
+		t.Fatal("security.requireTLS was not loaded")
 	}
 }
 

@@ -1,6 +1,8 @@
 package boot
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,50 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
+
+type testComponent struct {
+	name             string
+	started, stopped bool
+}
+
+func (c *testComponent) Name() string                { return c.name }
+func (c *testComponent) Start(context.Context) error { c.started = true; return nil }
+func (c *testComponent) Stop(context.Context) error  { c.stopped = true; return nil }
+
+func TestAppComponentLifecycleAndReadiness(t *testing.T) {
+	a := &App{}
+	first, second := &testComponent{name: "first"}, &testComponent{name: "second"}
+	if err := a.AddComponent(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddComponent(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AddComponent(first); err == nil {
+		t.Fatal("expected duplicate component error")
+	}
+	if err := a.AddReadinessCheck("dependency", func(context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !a.readinessOK() {
+		t.Fatal("readiness should pass")
+	}
+	if err := a.AddReadinessCheck("dependency", func(context.Context) error { return errors.New("down") }); err == nil {
+		t.Fatal("expected duplicate readiness check error")
+	}
+	if err := a.startComponents(1); err != nil {
+		t.Fatal(err)
+	}
+	if !first.started || !second.started {
+		t.Fatal("components did not start")
+	}
+	if err := a.stopComponents(1); err != nil {
+		t.Fatal(err)
+	}
+	if !first.stopped || !second.stopped {
+		t.Fatal("components did not stop")
+	}
+}
 
 func TestResolveAdvertiseAddrUsesExplicitValue(t *testing.T) {
 	t.Setenv("MF_ADVERTISE_IP", "10.0.1.9")
@@ -54,6 +100,11 @@ func TestValidateRuntimeConfigRejectsStartupFields(t *testing.T) {
 		t.Fatal("expected startup field change to be rejected")
 	}
 	next.Server.Addr = current.Server.Addr
+	next.Security.RequireTLS = true
+	if err := validateRuntimeConfigChange(current, next); err == nil {
+		t.Fatal("expected transport security policy change to require restart")
+	}
+	next.Security.RequireTLS = current.Security.RequireTLS
 	next.JWT.Secret = "rotated"
 	if err := validateRuntimeConfigChange(current, next); err != nil {
 		t.Fatalf("dynamic JWT change rejected: %v", err)
@@ -148,5 +199,26 @@ func TestEnsureOperationalRoutesReportsNotReadyUntilReady(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	if w.Code != http.StatusOK {
 		t.Fatalf("ready status = %d", w.Code)
+	}
+}
+
+func TestReadinessCheckPanicAndContextHangDoNotCrashOrBlock(t *testing.T) {
+	a := &App{}
+	if err := a.AddReadinessCheck("panic", func(context.Context) error { panic("boom") }); err != nil {
+		t.Fatal(err)
+	}
+	if a.readinessOK() {
+		t.Fatal("panic readiness check should fail")
+	}
+	b := &App{readinessCacheTTL: -1}
+	if err := b.AddReadinessCheck("hang", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if b.readinessOK() {
+		t.Fatal("hanging readiness check should fail")
+	}
+	if time.Since(started) > 3*time.Second {
+		t.Fatal("readiness check exceeded bounded timeout")
 	}
 }

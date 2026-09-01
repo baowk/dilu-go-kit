@@ -38,3 +38,27 @@ func loadTLSConfig(cfg TLSConfig) (*tls.Config, error) {
 	}
 	return result, nil
 }
+
+// loadGRPCServerTLSConfig loads a server certificate and optionally configures
+// mutual TLS. It is kept separate from loadTLSConfig because the latter is
+// used by clients and populates RootCAs rather than ClientCAs.
+func loadGRPCServerTLSConfig(cfg TLSConfig) (*tls.Config, error) {
+	if !cfg.Enable {
+		return nil, nil
+	}
+	if cfg.CertFile == "" || cfg.KeyFile == "" {
+		return nil, fmt.Errorf("gRPC server certFile and keyFile are required")
+	}
+	result, err := loadTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.RequireClientCert {
+		if result.RootCAs == nil {
+			return nil, fmt.Errorf("gRPC server CAFile is required when client certificate verification is enabled")
+		}
+		result.ClientCAs = result.RootCAs
+		result.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return result, nil
+}

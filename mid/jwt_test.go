@@ -71,6 +71,20 @@ func TestJWTTrustsHeaderUIDWhenExplicitlyEnabled(t *testing.T) {
 	}
 }
 
+func TestJWTQueryTokenDisabledByDefault(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(JWT(JWTConfig{Secret: "secret"}))
+	r.GET("/ws", func(c *gin.Context) { c.Status(http.StatusOK) })
+	req := httptest.NewRequest(http.MethodGet, "/ws?token=abc", nil)
+	req.Header.Set("Upgrade", "websocket")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", w.Code)
+	}
+}
+
 func TestJWTRejectsUnsignedAlgorithm(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

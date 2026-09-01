@@ -32,6 +32,7 @@ func OpenDB(cfg DatabaseConfig, mode string) (*gorm.DB, error) {
 				LogLevel:                  logLevel,
 				IgnoreRecordNotFoundError: true,
 				Colorful:                  mode == "debug",
+				ParameterizedQueries:      true,
 			},
 		),
 		SkipDefaultTransaction: true,
@@ -55,17 +56,32 @@ func OpenDB(cfg DatabaseConfig, mode string) (*gorm.DB, error) {
 	if maxIdle <= 0 {
 		maxIdle = 10
 	}
+	if maxIdle > 10_000 {
+		maxIdle = 10_000
+	}
 	maxOpen := cfg.MaxOpen
 	if maxOpen <= 0 {
 		maxOpen = 50
+	}
+	if maxOpen > 10_000 {
+		maxOpen = 10_000
+	}
+	if maxIdle > maxOpen {
+		maxIdle = maxOpen
 	}
 	maxLife := cfg.MaxLifetime
 	if maxLife <= 0 {
 		maxLife = 3600 // 1 hour
 	}
+	if maxLife > 7*24*60*60 {
+		maxLife = 7 * 24 * 60 * 60
+	}
 	maxIdleTime := cfg.MaxIdleTime
 	if maxIdleTime <= 0 {
 		maxIdleTime = 300 // 5 minutes — reclaim idle connections, prevent PG "too many connections"
+	}
+	if maxIdleTime > 7*24*60*60 {
+		maxIdleTime = 7 * 24 * 60 * 60
 	}
 
 	sqlDB.SetMaxIdleConns(maxIdle)

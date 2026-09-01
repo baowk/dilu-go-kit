@@ -17,6 +17,7 @@ type etcdRegistry struct {
 	client  *clientv3.Client
 	cfg     Config
 	mu      sync.Mutex
+	wg      sync.WaitGroup
 	leases  map[string]clientv3.LeaseID   // instanceID → leaseID
 	cancels map[string]context.CancelFunc // instanceID → keepalive cancel
 }
@@ -35,6 +36,8 @@ func NewEtcd(cfg Config) (Registry, error) {
 		Endpoints:   cfg.Endpoints,
 		DialTimeout: cfg.dialTimeout(),
 		TLS:         tlsConfig,
+		Username:    cfg.Username,
+		Password:    cfg.Password,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("registry: etcd connect: %w", err)
@@ -43,9 +46,18 @@ func NewEtcd(cfg Config) (Registry, error) {
 	// Verify connectivity
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.dialTimeout())
 	defer cancel()
-	if _, err := client.Status(ctx, cfg.Endpoints[0]); err != nil {
+	var statusErr error
+	for _, endpoint := range cfg.Endpoints {
+		if _, err := client.Status(ctx, endpoint); err == nil {
+			statusErr = nil
+			break
+		} else {
+			statusErr = err
+		}
+	}
+	if statusErr != nil {
 		_ = client.Close()
-		return nil, fmt.Errorf("registry: etcd status: %w", err)
+		return nil, fmt.Errorf("registry: etcd status: %w", statusErr)
 	}
 
 	return &etcdRegistry{
@@ -86,7 +98,8 @@ func (r *etcdRegistry) Register(ctx context.Context, svc Service) error {
 		cancel()
 	}
 
-	go r.keepAliveLoop(kaCtx, svc, leaseID)
+	r.wg.Add(1)
+	go func() { defer r.wg.Done(); r.keepAliveLoop(kaCtx, svc, leaseID) }()
 
 	slog.Info("registry: registered",
 		"service", svc.Name,
@@ -347,5 +360,6 @@ func (r *etcdRegistry) Close() error {
 	for _, leaseID := range leases {
 		_, _ = r.client.Revoke(ctx, leaseID)
 	}
+	r.wg.Wait()
 	return r.client.Close()
 }

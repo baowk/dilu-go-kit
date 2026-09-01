@@ -1,8 +1,10 @@
 package mid
 
 import (
+	"strings"
 	"time"
 
+	kitlog "github.com/baowk/dilu-go-kit/log"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -61,13 +63,16 @@ func RateLimitFromConfig(cfg AccessLimitCfg) gin.HandlerFunc {
 		dur = 5
 	}
 	window := time.Duration(dur) * time.Second
-	if cfg.Backend == "redis" && cfg.Redis != nil {
+	if strings.EqualFold(strings.TrimSpace(cfg.Backend), "redis") && cfg.Redis != nil {
 		return RedisRateLimit(RedisRateLimitConfig{
 			Client:    cfg.Redis,
 			Max:       total,
 			Window:    window,
 			KeyPrefix: cfg.KeyPrefix,
 		})
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Backend), "redis") && cfg.Redis == nil {
+		kitlog.Warn("redis rate limiter unavailable; falling back to bounded in-memory limiter")
 	}
 	return RateLimit(total, window)
 }

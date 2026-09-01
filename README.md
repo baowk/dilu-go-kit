@@ -5,20 +5,28 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 ## 特性
 
 - **boot** — 一行启动服务（Config + DB + Redis + gRPC + 注册 + 远程配置 + 优雅关闭）
+- **boot.Component** — 统一后台任务启动、停止和反向关闭
 - **log** — 统一日志接口（slog 实现，traceId 自动注入，支持 console/file/both 输出）
 - **mid** — 可配置中间件（Trace + Recovery + Logger + ErrorHandler + JWT + CORS + RateLimit）
 - **resp** — 统一 HTTP 响应（Ok / Fail / Page / Error）+ 标准错误码
+- **apperr** — transport-neutral 业务错误及 HTTP/gRPC 安全映射
 - **store** — 数据访问层基础类型（ListOpts 分页）
 - **stream** — Redis Stream 基础封装（发布、消费组、读取、ACK、死信）
+- **stream tracing** — 发布时注入 W3C trace context，消费时可恢复上游上下文
 - **clientx** — 服务客户端基础能力（重试、熔断、gRPC 错误码映射）
 - **migratex** — PostgreSQL SQL 迁移封装（up/down/version/force/create）
 - **registry** — 服务注册与发现（etcd / consul）
+- **registry.Resolver** — 客户端 Watch 缓存与 RoundRobin/Random 负载均衡
 - **notify** — 通用 HTTP 事件推送（支持 traceId 透传）
 - **metrics** — Prometheus HTTP/gRPC 指标（支持运行时服务名）
+- **dependency metrics** — 统一出站依赖请求计数和延迟指标
+- **clientx.HTTPClient** — HTTP 出站超时、幂等重试、熔断与 trace 透传
+- **telemetry** — 可选 OpenTelemetry tracing（OTLP HTTP + W3C 传播，默认 no-op）
+- **diagnostics** — 显式注册 pprof 运行时诊断接口（默认关闭）
 
 ## 安装
 
-要求 Go 1.26.5 或更高版本。
+要求 Go 1.27.0 或更高版本。
 
 ```bash
 go get github.com/baowk/dilu-go-kit@latest
@@ -173,10 +181,66 @@ gRPC 客户端默认明文，仅适合可信内网；跨网络或零信任环境
 ```go
 conn, _ := grpcx.Dial(addr, grpcx.DialOption{
     TLSConfig: &tls.Config{ServerName: "mf-user.internal"},
+    RequireTLS: true,
     RetryMaxAttempts: 3,
     RetryMethods: []string{"/user.UserService/Get"}, // 只列幂等方法
 })
 ```
+
+### 基础设施传输安全
+
+Redis、etcd/Consul 和 gRPC 服务端的 TLS 都是显式配置项。本地开发可保持默认明文，
+不需要准备证书；跨主机、跨网段或生产环境建议在本地配置中设置
+`security.requireTLS: true`，此时只要启用的 Redis、注册中心或 gRPC 仍为明文，
+`boot.New` 会在建立连接前直接失败。远程配置不能热修改这项启动策略，修改后必须重启服务。
+
+```yaml
+security:
+  requireTLS: false # 本地/可信内网；生产改为 true
+
+redis:
+  addr: "127.0.0.1:6379"
+  tls:
+    enable: false
+
+grpc:
+  enable: false
+  tls:
+    enable: false
+```
+
+生产示例（证书路径和密码通过部署系统或环境变量管理）：
+
+```yaml
+security:
+  requireTLS: true
+
+redis:
+  addr: "redis.internal:6379"
+  tls:
+    enable: true
+    caFile: "/etc/tls/redis-ca.crt"
+    serverName: "redis.internal"
+
+registry:
+  enable: true
+  tls:
+    enable: true
+    caFile: "/etc/tls/registry-ca.crt"
+
+grpc:
+  enable: true
+  addr: ":9090"
+  tls:
+    enable: true
+    certFile: "/etc/tls/server.crt"
+    keyFile: "/etc/tls/server.key"
+    caFile: "/etc/tls/client-ca.crt"
+    requireClientCert: true
+```
+
+`grpcx.DialOption.RequireTLS` 可对单个 gRPC 客户端调用强制拒绝明文凭据；不设置时保持
+兼容旧代码的明文默认值。`InsecureSkipVerify` 在强制 TLS 模式下会被拒绝。
 
 ## 服务客户端
 
@@ -199,6 +263,29 @@ if err != nil {
     code := clientx.CodeOf(err)
     _ = code
 }
+```
+
+HTTP 出站调用可统一使用 `clientx.HTTPClient`：默认只对幂等方法重试，并可接入熔断和 OTel。
+
+```go
+httpc := clientx.NewHTTPClient(clientx.HTTPClientConfig{
+    Timeout: 5 * time.Second,
+    Breaker: breaker,
+    Telemetry: app.Telemetry,
+    ServiceName: "inventory-service",
+})
+req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+resp, err := httpc.Do(ctx, req)
+```
+
+注册中心客户端可使用 Resolver 自动接收实例变更：
+
+```go
+resolver, _ := registry.NewResolver(ctx, registry.ResolverConfig{
+    Registry: app.Registry, Service: "inventory-service",
+})
+defer resolver.Close()
+instance, err := resolver.Resolve()
 ```
 
 ## 标准错误码
@@ -232,6 +319,57 @@ r.GET("/metrics", metrics.Handler())
 应位于 JWT 业务路由之外，并通过网络策略限制指标端点访问。应用未显式注册
 `/health` 或 `/ready` 时，`boot.Run` 会补默认 OK 路由；需要依赖检查时自行注册
 更严格的 `/ready`。
+`metrics.Handler()` 默认仅允许回环地址抓取；跨网络 Prometheus 请设置
+`METRICS_TOKEN` 或 `METRICS_ALLOWED_CIDRS`。
+依赖检查结果默认缓存 2 秒，可通过 `app.SetReadinessCacheTTL` 调整；传入负值可关闭缓存。
+
+## OpenTelemetry
+
+通过配置或 `OTEL_*` 环境变量启用 OTLP tracing；未配置 exporter 时默认 no-op，不影响旧服务：
+
+```yaml
+telemetry:
+  enabled: true
+  endpoint: "http://127.0.0.1:4318/v1/traces"
+  sampleRatio: 0.1
+```
+
+`sampleRatio` 范围为 `0~1`，默认 `0.1`（10% 采样）。开发环境可显式设置为 `1.0`。
+也可使用标准环境变量：
+`OTEL_TRACES_SAMPLER=always_off|always_on|parentbased_traceidratio`，并通过
+`OTEL_TRACES_SAMPLER_ARG` 设置比例，例如 `0.1`。
+
+`boot.New` 会自动给 Gin 和 boot 创建的 gRPC server 添加 tracing。自建 gRPC client
+可传入 `grpcx.DialOption{Telemetry: app.Telemetry}`。
+
+通过 `boot.New` 创建的 DB 和 Redis 客户端在 OTel 开启后也会自动注册基础埋点；
+Redis Stream 操作可将 provider 放入上下文：
+
+```go
+ctx = stream.WithTelemetry(ctx, app.Telemetry)
+id, err := stream.Publish(ctx, app.Redis, "events", payload)
+```
+
+消费者处理消息时可恢复发布端上下文：
+
+```go
+msgCtx := stream.ContextForMessage(ctx, msg)
+```
+
+## 运行时诊断
+
+需要排查 goroutine、heap 或 mutex 时，显式注册 pprof；务必限制在内网或管理端口：
+
+```yaml
+diagnostics:
+  pprof:
+    enabled: false
+    prefix: "/debug/pprof"
+    addr: "127.0.0.1:6060"
+```
+
+配置 `addr` 后由 `boot` 启动独立管理端口；不配置 `addr` 时才注册到业务 Gin 端口。
+生产环境建议始终使用 loopback/内网管理地址或额外认证策略保护。
 
 ## 事件通知
 
@@ -376,6 +514,8 @@ REGISTRY_TOKEN='...'
 NOTIFY_WS_URL='http://mf-ws:9020'
 NOTIFY_TOKEN='...'
 REMOTE_NODE='node-1'
+REQUIRE_TLS='true'             # 跨网络/生产强制 Redis、注册中心、gRPC 使用 TLS
+METRICS_TOKEN='...'            # 或使用 METRICS_ALLOWED_CIDRS 限制抓取来源
 ```
 
 `DATABASE_DSN` 会覆盖所有 `database.*.dsn`，只适合单库或所有库共用同一 DSN。
@@ -399,7 +539,11 @@ server:
   idleTimeout: 60
   shutdownTimeout: 10
   maxHeaderBytes: 1048576
+  maxBodyBytes: 10485760       # 请求体上限，默认 10 MiB
   trustedProxies: ["10.0.0.0/8"] # 仅填写可信网关 CIDR
+
+security:
+  requireTLS: false             # 本地/可信内网；跨网络或生产建议设为 true
 
 database:
   main:
@@ -412,6 +556,20 @@ redis:
   addr: "127.0.0.1:6379"
   username: ""                # Redis 6+ ACL（可选）
   password: ""                # 建议用 REDIS_PASSWORD 注入
+  # tls:
+  #   enable: true
+  #   caFile: "/etc/tls/redis-ca.crt"
+  #   serverName: "redis.internal"
+
+grpc:
+  enable: false
+  # addr: ":9090"
+  # tls:
+  #   enable: true
+  #   certFile: "/etc/tls/server.crt"
+  #   keyFile: "/etc/tls/server.key"
+  #   caFile: "/etc/tls/client-ca.crt"
+  #   requireClientCert: true
 
 log:
   output: console             # console / file / both
@@ -423,6 +581,16 @@ jwt:
   expires: 1440
   issuer: auth-service
   audience: ["my-service"]
+  # trustHeaderUid: true 时限制来源网段（逗号分隔）
+  # trustedHeaderCidrs: "10.0.0.0/8,127.0.0.1/32"
+  # allowQueryToken: false     # WebSocket URL token 兼容开关，默认关闭
+
+diagnostics:
+  pprof:
+    enabled: false
+    # addr: "127.0.0.1:6060"
+    # authToken: ""             # 使用 PPROF_TOKEN 注入
+    # allowedCidrs: "127.0.0.1/32"
 
 cors:
   enable: true
@@ -448,6 +616,10 @@ registry:
   checkPath: "/ready"         # consul readiness check path
   deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # address: "127.0.0.1:8500"  # consul
+  # tls:                       # 同时用于服务注册和远程配置
+  #   enable: true
+  #   caFile: "/etc/tls/registry-ca.crt"
+  #   serverName: "registry.internal"
   # token: ""                  # 建议用 REGISTRY_TOKEN 注入
   configKey: "/config/"       # 启用远程配置
   # configNode: "node-1"      # 节点级覆盖

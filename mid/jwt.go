@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,10 +16,14 @@ import (
 
 // JWTConfig configures the JWT middleware.
 type JWTConfig struct {
-	Secret   string // HMAC signing key
-	Issuer   string
-	Subject  string
-	Audience []string
+	Secret             string // HMAC signing key
+	Issuer             string
+	Subject            string
+	Audience           []string
+	TrustedHeaderCIDRs []string
+	// AllowQueryToken enables the legacy WebSocket ?token= flow. Authorization
+	// headers are preferred because URLs are routinely logged.
+	AllowQueryToken bool
 
 	// HeaderUID is an optional header name for pre-verified user ID
 	// (e.g. from an API gateway). If set and present, JWT parsing is skipped.
@@ -41,10 +46,11 @@ type JWTConfig struct {
 // JWT returns a Gin middleware that verifies Bearer tokens.
 // On success it sets "uid" (int64) in the Gin context.
 func JWT(cfg JWTConfig) gin.HandlerFunc {
+	trustedNetworks := parseTrustedCIDRs(cfg.TrustedHeaderCIDRs)
 	return func(c *gin.Context) {
 		// Pre-verified by gateway. This is opt-in because identity headers are
 		// trivially spoofable on services that can be reached directly.
-		if cfg.HeaderUID != "" && cfg.TrustHeaderUID {
+		if cfg.HeaderUID != "" && cfg.TrustHeaderUID && trustedHeaderSourceAllowed(c, trustedNetworks) {
 			if uidStr := c.GetHeader(cfg.HeaderUID); uidStr != "" {
 				uid, _ := strconv.ParseInt(uidStr, 10, 64)
 				if uid > 0 {
@@ -58,7 +64,7 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 
 		// Parse Bearer token
 		auth := c.GetHeader("Authorization")
-		if auth == "" && strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+		if auth == "" && cfg.AllowQueryToken && strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
 			auth = "Bearer " + c.Query("token")
 		}
 		parts := strings.Fields(auth)
@@ -129,6 +135,39 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func parseTrustedCIDRs(values []string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(value))
+		if err == nil {
+			out = append(out, network)
+		}
+	}
+	return out
+}
+
+func trustedHeaderSourceAllowed(c *gin.Context, networks []*net.IPNet) bool {
+	if len(networks) == 0 {
+		// Development and existing callers may omit the allowlist. boot.Config
+		// rejects that configuration in release/production mode.
+		return true
+	}
+	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		host = c.Request.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, network := range networks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func setTrustedHeaderContext(c *gin.Context, cfg JWTConfig) {
