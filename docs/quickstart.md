@@ -6,6 +6,11 @@
 go get github.com/baowk/dilu-go-kit@latest
 ```
 
+当前版本要求 Go 1.27.0 或更高版本。核心依赖版本基线为：etcd `v3.7.1`、Consul API
+`v1.34.4`、go-redis `v9.22.0`、Prometheus client `v1.24.1`、OpenTelemetry
+`v1.46.0`、gRPC `v1.83.2`、GORM `v1.31.2`（PostgreSQL 驱动 `v1.6.2`）。这些版本
+已在仓库的 `go.mod` 中锁定；升级时应保持 etcd/OTel 相关模块的版本对齐并完成完整验证。
+
 ## 使用脚手架创建服务
 
 ```bash

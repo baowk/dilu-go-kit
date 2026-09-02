@@ -35,6 +35,9 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 go get github.com/baowk/dilu-go-kit@latest
 ```
 
+核心依赖版本和升级规则见 [`docs/conventions.md`](docs/conventions.md)；根目录 `go.mod`
+始终记录当前锁定版本。
+
 ## AI 友好的契约和脚手架
 
 服务 API 建议使用 `api/<service>/v1/*.proto` 作为唯一契约，通过 Buf 生成 Go、gRPC、HTTP

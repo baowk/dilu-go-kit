@@ -18,6 +18,30 @@
 - 快速上手见 `docs/quickstart.md`
 - 示例服务使用 `example/internal/{module}/...`，不要再使用 `internal/modules/{module}`。
 
+## 依赖版本基线与升级
+
+当前主分支依赖基线（具体以根目录 `go.mod` 为准）：
+
+| 组件 | 版本 |
+| --- | --- |
+| etcd API/client/client/pkg | `v3.7.1` |
+| Consul API | `v1.34.4` |
+| Redis client | `v9.22.0` |
+| Prometheus client | `v1.24.1` |
+| OpenTelemetry（核心、SDK、trace、OTLP HTTP） | `v1.46.0` |
+| gRPC | `v1.83.2` |
+| GORM | `v1.31.2`（PostgreSQL 驱动 `v1.6.2`） |
+
+升级依赖时：
+
+- etcd 的 `api/v3`、`client/v3`、`client/pkg/v3` 必须保持同一版本；OTel 核心、SDK、
+  trace、metric 和 exporter 必须保持同一稳定版本。
+- 必须运行 `go mod tidy` 并检查间接依赖、API/行为兼容性和安全公告，不要只手工修改版本号。
+- 除常规测试外，提交前执行 `go test ./...`、`go test -race ./...`、`go vet ./...`、
+  `go mod verify`、`govulncheck ./...`、`git diff --check`；核心依赖升级再执行
+  `go test -count=1 -shuffle=on ./...`。
+- 发布时同步更新 README/CHANGELOG（如存在）的依赖版本说明；生产环境先在 staging 验证。
+
 ## 模块拆分硬约束
 
 业务模块按资源拆文件，禁止把多个资源堆到一个大文件：

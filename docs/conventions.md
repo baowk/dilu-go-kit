@@ -1,5 +1,32 @@
 # 开发规范
 
+## 零、依赖版本与升级
+
+仓库当前依赖基线如下，具体版本以根目录 `go.mod` 为准：
+
+| 组件 | 版本 |
+| --- | --- |
+| etcd API/client/client/pkg | `v3.7.1` |
+| Consul API | `v1.34.4` |
+| go-redis | `v9.22.0` |
+| Prometheus client | `v1.24.1` |
+| OpenTelemetry（核心、SDK、trace、OTLP HTTP） | `v1.46.0` |
+| gRPC | `v1.83.2` |
+| GORM | `v1.31.2` |
+| GORM PostgreSQL 驱动 | `v1.6.2` |
+
+升级约束：
+
+- etcd 的 `api/v3`、`client/v3`、`client/pkg/v3` 必须同步升级到同一版本。
+- OpenTelemetry 核心、`sdk`、`trace`、`metric` 及 OTLP exporter 必须保持同一稳定版本。
+- 依赖升级后必须检查间接依赖变化、编译/API 兼容性和安全公告；不得只修改单个 `go.mod`
+  条目而跳过 `go mod tidy`。
+- 提交前至少执行 `go test ./...`、`go test -race ./...`、`go vet ./...`、
+  `go mod verify`、`govulncheck ./...` 和 `git diff --check`；涉及核心依赖时再执行随机
+  测试（`go test -count=1 -shuffle=on ./...`）。
+- 发布版本时在 README/CHANGELOG（如存在）记录依赖基线和潜在行为变更；生产环境先在
+  staging 验证，再滚动升级并观察错误率、延迟和资源使用。
+
 ## 一、项目结构
 
 ```
