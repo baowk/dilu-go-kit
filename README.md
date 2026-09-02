@@ -16,13 +16,16 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 - **clientx** — 服务客户端基础能力（重试、熔断、gRPC 错误码映射）
 - **migratex** — PostgreSQL SQL 迁移封装（up/down/version/force/create）
 - **registry** — 服务注册与发现（etcd / consul）
-- **registry.Resolver** — 客户端 Watch 缓存与 RoundRobin/Random 负载均衡
+- **registry.Resolver** — 客户端 Watch 缓存、RoundRobin/Random 负载均衡与可选版本/标签过滤
 - **notify** — 通用 HTTP 事件推送（支持 traceId 透传）
 - **metrics** — Prometheus HTTP/gRPC 指标（支持运行时服务名）
 - **dependency metrics** — 统一出站依赖请求计数和延迟指标
 - **clientx.HTTPClient** — HTTP 出站超时、幂等重试、熔断与 trace 透传
 - **telemetry** — 可选 OpenTelemetry tracing（OTLP HTTP + W3C 传播，默认 no-op）
 - **diagnostics** — 显式注册 pprof 运行时诊断接口（默认关闭）
+- **Proto/Buf** — 契约优先生成 Go、gRPC、HTTP Gateway 和 OpenAPI
+- **cmd/dilu** — AI 友好的服务与资源脚手架
+- **grpcx.DialService** — 注册中心服务名拨号 + 健康实例 round_robin
 
 ## 安装
 
@@ -31,6 +34,29 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 ```bash
 go get github.com/baowk/dilu-go-kit@latest
 ```
+
+## AI 友好的契约和脚手架
+
+服务 API 建议使用 `api/<service>/v1/*.proto` 作为唯一契约，通过 Buf 生成 Go、gRPC、HTTP
+Gateway 和 OpenAPI：
+
+```bash
+make buf-install       # 将固定版本 Buf 安装到 ./bin
+make proto-lint
+make proto-generate    # 输出到 gen/（已加入 .gitignore）
+```
+
+新服务和资源可由脚手架生成，生成结果遵循本仓库的分层约束：
+
+```bash
+go run ./cmd/dilu new service inventory --dir ./services/inventory --module example.com/inventory
+go run ./cmd/dilu add resource task --dir ./services/inventory --module inventory
+go run ./cmd/dilu generate --dir ./services/inventory
+```
+
+脚手架会拒绝覆盖已有文件；业务代码只应补充 `internal/<module>/biz`、`data`、`service` 和
+`server`，不要手改生成的 Proto transport 文件。CI 可执行 `make proto-lint proto-generate`
+并检查生成结果无漂移。
 
 ## 快速开始
 
@@ -94,6 +120,8 @@ stream/     Redis Stream 基础封装
 clientx/    服务客户端重试、熔断、错误码映射
 migratex/   PostgreSQL SQL 迁移封装
 registry/   服务注册与发现（etcd / consul）
+api/        Proto 服务契约（Buf 管理）
+cmd/dilu/    服务/资源脚手架与生成入口
 notify/     通用事件推送
 metrics/    Prometheus HTTP/gRPC 指标
 example/    完整示例服务
@@ -242,6 +270,20 @@ grpc:
 `grpcx.DialOption.RequireTLS` 可对单个 gRPC 客户端调用强制拒绝明文凭据；不设置时保持
 兼容旧代码的明文默认值。`InsecureSkipVerify` 在强制 TLS 模式下会被拒绝。
 
+按服务名拨号时，可直接接入注册中心 Resolver。它会持续同步健康实例，并使用 gRPC
+`round_robin` 在实例间分配请求：
+
+```go
+conn, err := grpcx.DialService(ctx, app.Registry, "inventory-service", grpcx.DialOption{
+    Version: "v2", // 可选：只连接 v2 实例
+    Metadata: map[string]string{"region": "cn-east-1"}, // 可选标签过滤
+    TLSConfig: &tls.Config{ServerName: "inventory.internal"},
+    RequireTLS: true,
+})
+```
+
+直接地址拨号仍使用 `grpcx.Dial`，不会改变旧服务行为。
+
 ## 服务客户端
 
 ```go
@@ -282,7 +324,8 @@ resp, err := httpc.Do(ctx, req)
 
 ```go
 resolver, _ := registry.NewResolver(ctx, registry.ResolverConfig{
-    Registry: app.Registry, Service: "inventory-service",
+    Registry: app.Registry, Service: "inventory-service", Version: "v2",
+    Metadata: map[string]string{"region": "cn-east-1"},
 })
 defer resolver.Close()
 instance, err := resolver.Resolve()
@@ -321,6 +364,9 @@ r.GET("/metrics", metrics.Handler())
 更严格的 `/ready`。
 `metrics.Handler()` 默认仅允许回环地址抓取；跨网络 Prometheus 请设置
 `METRICS_TOKEN` 或 `METRICS_ALLOWED_CIDRS`。
+Consul 服务健康检查默认使用 HTTP，与注册中心自身 TLS 独立；只有服务的 `/ready`
+本身启用 HTTPS 时才设置 `registry.checkTLS: true`。pprof 独立管理端口支持 HTTPS/mTLS，
+主业务 HTTP 监听仍建议由网关负责 TLS 终止。
 依赖检查结果默认缓存 2 秒，可通过 `app.SetReadinessCacheTTL` 调整；传入负值可关闭缓存。
 
 ## OpenTelemetry
@@ -332,9 +378,11 @@ telemetry:
   enabled: true
   endpoint: "http://127.0.0.1:4318/v1/traces"
   sampleRatio: 0.1
+  # sampleRatioSet: true    # 需要关闭采样时设 sampleRatio: 0 并显式打开此项
 ```
 
-`sampleRatio` 范围为 `0~1`，默认 `0.1`（10% 采样）。开发环境可显式设置为 `1.0`。
+`sampleRatio` 范围为 `0~1`，默认 `0.1`（10% 采样）。开发环境可显式设置为 `1.0`；若要关闭采样，
+设置 `sampleRatio: 0` 并同时设置 `sampleRatioSet: true`。
 也可使用标准环境变量：
 `OTEL_TRACES_SAMPLER=always_off|always_on|parentbased_traceidratio`，并通过
 `OTEL_TRACES_SAMPLER_ARG` 设置比例，例如 `0.1`。
@@ -530,6 +578,7 @@ Redis、etcd 和 Consul 跨主机部署时应启用 TLS。配置支持 `tls.enab
 ```yaml
 server:
   name: my-service
+  version: v1.2.0                # 可选；用于服务发现版本过滤
   addr: ":8080"                  # 监听地址
   # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug
@@ -606,6 +655,8 @@ accessLimit:
 notify:
   wsUrl: "http://mf-ws:9020"
   token: ""                    # 建议用 NOTIFY_TOKEN 注入
+  timeout: 3                   # 单次请求超时（秒）
+  maxPayloadBytes: 1048576    # 单次事件上限，最大 16 MiB
 
 registry:
   enable: true

@@ -71,6 +71,21 @@ func TestJWTTrustsHeaderUIDWhenExplicitlyEnabled(t *testing.T) {
 	}
 }
 
+func TestJWTRejectsTrustedHeaderWhenCIDRConfigIsInvalid(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(JWT(JWTConfig{Secret: "secret", HeaderUID: "a_uid", TrustHeaderUID: true, TrustedHeaderCIDRs: []string{"invalid"}}))
+	r.GET("/me", func(c *gin.Context) { c.String(http.StatusOK, "uid=%d", GetUID(c)) })
+	req := httptest.NewRequest(http.MethodGet, "/me", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("a_uid", "42")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid CIDR must not trust header, got status %d", w.Code)
+	}
+}
+
 func TestJWTQueryTokenDisabledByDefault(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

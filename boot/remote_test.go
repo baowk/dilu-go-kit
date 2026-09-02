@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -213,6 +214,18 @@ func TestMergeLayerRejectsSensitiveValues(t *testing.T) {
 	}
 }
 
+func TestRemoteSensitivePathCoversInfrastructureCredentials(t *testing.T) {
+	for _, input := range []string{
+		"registry:\n  password: leaked\n",
+		"diagnostics:\n  pprof:\n    authToken: leaked\n",
+	} {
+		var cfg Config
+		if err := unmarshalBytes([]byte(input), "yaml", &cfg); err == nil {
+			t.Fatalf("expected sensitive remote config rejection for %q", input)
+		}
+	}
+}
+
 func TestMergeConfigLayersRebuildsFromLocalBase(t *testing.T) {
 	base := &Config{
 		Server: ServerConfig{Name: "local", Addr: ":8080", Mode: "debug"},
@@ -320,5 +333,17 @@ func TestRemoteConsulClient_fallbackToEndpoints(t *testing.T) {
 	}
 	if cli == nil {
 		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestRegistryConfigRemoteDialTimeoutIsBounded(t *testing.T) {
+	if got := (RegistryConfig{}).dialTimeout(); got != 5*time.Second {
+		t.Fatalf("default remote dial timeout = %s", got)
+	}
+	if got := (RegistryConfig{DialTimeout: 10}).dialTimeout(); got != 10*time.Second {
+		t.Fatalf("configured remote dial timeout = %s", got)
+	}
+	if got := (RegistryConfig{DialTimeout: 9999}).dialTimeout(); got != 5*time.Minute {
+		t.Fatalf("bounded remote dial timeout = %s", got)
 	}
 }

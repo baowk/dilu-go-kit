@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package demo.v1;
+
+option go_package = "github.com/baowk/dilu-go-kit/gen/demo/v1;demov1";
+
+import "google/api/annotations.proto";
+
+service DemoService {
+  rpc Ping(PingRequest) returns (PingResponse) {
+    option (google.api.http) = {
+      get: "/v1/demo/ping"
+    };
+  }
+}
+
+message PingRequest {}
+
+message PingResponse {
+  string message = 1;
+}

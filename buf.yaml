@@ -1,0 +1,15 @@
+version: v2
+
+modules:
+  - path: api
+    name: buf.build/baowk/dilu-go-kit
+deps:
+  - buf.build/googleapis/googleapis
+
+lint:
+  use:
+    - STANDARD
+
+breaking:
+  use:
+    - FILE

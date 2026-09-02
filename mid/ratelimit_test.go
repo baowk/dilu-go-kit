@@ -91,3 +91,19 @@ func TestRateLimitFromConfigFallsBackToMemoryWithoutRedisClient(t *testing.T) {
 		t.Fatalf("second status = %d", w.Code)
 	}
 }
+
+func TestRedisRateLimiterFailsClosedWithoutBackend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(RedisRateLimit(RedisRateLimitConfig{Max: 1, Window: time.Minute}))
+	r.GET("/x", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("missing Redis backend status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}

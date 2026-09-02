@@ -54,6 +54,12 @@ func TestConsulConfigAppliesExplicitToken(t *testing.T) {
 	if cfg.Address != "127.0.0.1:8500" || cfg.Token != "explicit-token" {
 		t.Fatalf("consul config = address %q token %q", cfg.Address, cfg.Token)
 	}
+	if cfg.HttpClient == nil {
+		t.Fatal("consul HTTP client is nil")
+	}
+	if cfg.HttpClient.Timeout < 60*time.Second {
+		t.Fatalf("consul HTTP timeout = %v, want at least 60s for blocking queries", cfg.HttpClient.Timeout)
+	}
 }
 
 func TestConsulConfigEnablesTLS(t *testing.T) {
@@ -182,6 +188,7 @@ func TestMarshalUnmarshalService(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	svc := Service{
 		Name:       "mf-user",
+		Version:    "v1.2.3",
 		InstanceID: "inst-1",
 		Addr:       "10.0.1.5:7801",
 		GRPCAddr:   "10.0.1.5:7889",
@@ -199,7 +206,7 @@ func TestMarshalUnmarshalService(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if got.Name != svc.Name || got.InstanceID != svc.InstanceID ||
+	if got.Name != svc.Name || got.Version != svc.Version || got.InstanceID != svc.InstanceID ||
 		got.Addr != svc.Addr || got.GRPCAddr != svc.GRPCAddr {
 		t.Errorf("round-trip mismatch: got %+v", got)
 	}
@@ -226,6 +233,70 @@ func TestValidateServiceRejectsInvalidPort(t *testing.T) {
 	}
 }
 
+func TestValidateServiceRejectsInvalidGRPCAddress(t *testing.T) {
+	if err := validateService(Service{Name: "svc", InstanceID: "inst", Addr: "10.0.0.1:8080", GRPCAddr: "10.0.0.1:bad"}); err == nil {
+		t.Fatal("expected invalid gRPC address to be rejected")
+	}
+}
+
+func TestConsulHTTPHealthCheckDoesNotFollowRegistryTLS(t *testing.T) {
+	check, usesTTL, err := consulServiceCheck(Config{CheckType: "http", TLS: TLSConfig{Enable: true}}, "check-inst-1", "10.0.1.5:7801")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usesTTL || check.HTTP != "http://10.0.1.5:7801/ready" {
+		t.Fatalf("health check unexpectedly followed registry TLS: %+v", check)
+	}
+	check, _, err = consulServiceCheck(Config{CheckType: "http", CheckTLS: true}, "check-inst-1", "10.0.1.5:7801")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check.HTTP != "https://10.0.1.5:7801/ready" {
+		t.Fatalf("explicit check TLS not applied: %q", check.HTTP)
+	}
+}
+
+func TestServiceFilters(t *testing.T) {
+	services := []Service{
+		{InstanceID: "v1", Version: "v1", Meta: map[string]string{"region": "cn", "canary": "false"}},
+		{InstanceID: "v2", Version: "v2", Meta: map[string]string{"region": "cn", "canary": "true"}},
+		{InstanceID: "v2-us", Version: "v2", Meta: map[string]string{"region": "us", "canary": "true"}},
+	}
+	filter := AndFilters(VersionFilter("v2"), MetadataFilter(map[string]string{"region": "cn", "canary": "true"}))
+	filtered := filterServices(services, filter)
+	if len(filtered) != 1 || filtered[0].InstanceID != "v2" {
+		t.Fatalf("filtered services = %+v", filtered)
+	}
+	// Legacy registrations used meta.version before Version was first-class.
+	if !VersionFilter("v1")(Service{Meta: map[string]string{"version": "v1"}}) {
+		t.Fatal("legacy meta version should match")
+	}
+}
+
+func TestWatchUpstreamsAppliesFilter(t *testing.T) {
+	reg := &fakeRegistry{
+		discovered: []Service{
+			{InstanceID: "v1", Version: "v1", Addr: "10.0.1.1:7801"},
+			{InstanceID: "v2", Version: "v2", Addr: "10.0.1.2:7801"},
+		},
+		events: make(chan Event),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	snapshots, err := WatchUpstreamsWithOptions(ctx, reg, "orders", WatchUpstreamsOptions{
+		Filter:           VersionFilter("v2"),
+		ResyncInterval:   time.Hour,
+		StaleGracePeriod: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial := receiveSnapshot(t, snapshots)
+	if initial.Stale || len(initial.Services) != 1 || initial.Services[0].Version != "v2" {
+		t.Fatalf("filtered initial snapshot = %+v", initial)
+	}
+}
+
 // --------------- GenerateInstanceID ---------------
 
 func TestGenerateInstanceID(t *testing.T) {
@@ -248,6 +319,19 @@ func TestEtcdDeleteEventIncludesInstanceID(t *testing.T) {
 	})
 	if !ok || event.Service.InstanceID != "inst-1" {
 		t.Fatalf("event = %+v ok=%v", event, ok)
+	}
+}
+
+func TestEtcdEventRejectsPayloadKeyMismatch(t *testing.T) {
+	event, ok := etcdEvent("/svc/mf-user/", "mf-user", &clientv3.Event{
+		Type: clientv3.EventTypePut,
+		Kv: &mvccpb.KeyValue{
+			Key:   []byte("/svc/mf-user/inst-1"),
+			Value: []byte(`{"name":"mf-user","instance_id":"inst-2","addr":"10.0.1.5:7801"}`),
+		},
+	})
+	if ok || event.Service.InstanceID != "inst-2" {
+		t.Fatalf("mismatched event = %+v ok=%v, want rejected", event, ok)
 	}
 }
 

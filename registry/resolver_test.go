@@ -48,3 +48,36 @@ func TestResolverRoundRobinAndSnapshot(t *testing.T) {
 		t.Fatalf("snapshot = %#v", r.Snapshot())
 	}
 }
+
+func TestResolverFiltersVersionAndMetadata(t *testing.T) {
+	rr := &resolverRegistry{
+		services: []Service{
+			{InstanceID: "v1", Version: "v1", Addr: "127.0.0.1:1", Meta: map[string]string{"region": "cn"}},
+			{InstanceID: "v2-cn", Version: "v2", Addr: "127.0.0.1:2", Meta: map[string]string{"region": "cn"}},
+			{InstanceID: "v2-us", Version: "v2", Addr: "127.0.0.1:3", Meta: map[string]string{"region": "us"}},
+		},
+		events: make(chan Event, 1),
+	}
+	r, err := NewResolver(context.Background(), ResolverConfig{
+		Registry:       rr,
+		Service:        "orders",
+		Version:        "v2",
+		Metadata:       map[string]string{"region": "cn"},
+		ResyncInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	deadline := time.Now().Add(time.Second)
+	for len(r.Snapshot()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	got, err := r.Resolve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.InstanceID != "v2-cn" {
+		t.Fatalf("resolved instance = %+v", got)
+	}
+}

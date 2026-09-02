@@ -1,6 +1,7 @@
 package boot
 
 import (
+	"github.com/baowk/dilu-go-kit/diagnostics"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -126,6 +127,15 @@ func TestValidateRequireTLSRejectsPlaintextTransports(t *testing.T) {
 			},
 			want: "grpc.tls.enable",
 		},
+		{
+			name: "notify",
+			cfg: Config{
+				Server:   ServerConfig{Name: "svc", Addr: ":8080"},
+				Security: SecurityConfig{RequireTLS: true},
+				Notify:   NotifyConfig{WsURL: "http://notify"},
+			},
+			want: "notify.wsUrl",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -151,6 +161,62 @@ func TestValidateGRPCTLSRequiresCertificates(t *testing.T) {
 	cfg.GRPC.TLS.RequireClientCert = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "grpc.tls caFile") {
 		t.Fatalf("Validate mTLS error = %v", err)
+	}
+}
+
+func TestValidatePprofTLSRequiresDedicatedListenerAndCertificates(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Name: "svc", Addr: ":8080"},
+		Diagnostics: diagnostics.Config{Pprof: diagnostics.PprofConfig{
+			Enabled: true,
+			TLS:     diagnostics.TLSConfig{Enable: true},
+		}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "dedicated addr") {
+		t.Fatalf("Validate error = %v", err)
+	}
+	cfg.Diagnostics.Pprof.Addr = "127.0.0.1:6060"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "certFile and keyFile") {
+		t.Fatalf("Validate certificate error = %v", err)
+	}
+}
+
+func TestReleasePprofRequiresPolicyForNonLoopbackHostname(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Name: "svc", Addr: ":8080", Mode: "release"},
+		Diagnostics: diagnostics.Config{Pprof: diagnostics.PprofConfig{
+			Enabled: true,
+			Addr:    "diagnostics.internal:6060",
+		}},
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "authToken or allowedCidrs") {
+		t.Fatalf("Validate error = %v", err)
+	}
+}
+
+func TestValidateNotifyLimits(t *testing.T) {
+	base := Config{Server: ServerConfig{Name: "svc", Addr: ":8080"}}
+	base.Notify.Timeout = -1
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "notify.timeout") {
+		t.Fatalf("negative notify timeout error = %v", err)
+	}
+	base.Notify.Timeout = 0
+	base.Notify.MaxPayloadBytes = 16<<20 + 1
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "notify.maxPayloadBytes") {
+		t.Fatalf("oversized notify payload limit error = %v", err)
+	}
+}
+
+func TestValidateTelemetrySampleRatio(t *testing.T) {
+	cfg := Config{Server: ServerConfig{Name: "svc", Addr: ":8080"}}
+	cfg.Telemetry.SampleRatio = 1.1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "telemetry.sampleRatio") {
+		t.Fatalf("invalid sample ratio error = %v", err)
+	}
+	cfg.Telemetry.SampleRatio = 0
+	cfg.Telemetry.SampleRatioSet = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("explicit zero sample ratio rejected: %v", err)
 	}
 }
 

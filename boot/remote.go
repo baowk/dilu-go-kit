@@ -68,6 +68,17 @@ func (r *RegistryConfig) configFormat() string {
 	return "yaml"
 }
 
+func (r RegistryConfig) dialTimeout() time.Duration {
+	if r.DialTimeout > 0 {
+		// Keep public helpers bounded even when called without Config.Validate.
+		if r.DialTimeout > 5*60 {
+			return 5 * time.Minute
+		}
+		return time.Duration(r.DialTimeout) * time.Second
+	}
+	return 5 * time.Second
+}
+
 // registryType returns "etcd" (default) or "consul".
 func (r *RegistryConfig) registryType() string {
 	if value := strings.ToLower(strings.TrimSpace(r.Type)); value != "" {
@@ -81,6 +92,13 @@ func (r *RegistryConfig) registryType() string {
 // LoadRemoteConfig reads a config value from etcd or consul KV and
 // unmarshals it into cfg.
 func LoadRemoteConfig(reg RegistryConfig, serviceName string, cfg any) error {
+	serviceName = strings.TrimSpace(serviceName)
+	if err := validateRemoteConfigInputs(reg, serviceName); err != nil {
+		return err
+	}
+	if cfg == nil {
+		return errors.New("remote config: destination is nil")
+	}
 	key := reg.resolveConfigKey(serviceName)
 	data, err := fetchRemoteByKey(reg, key)
 	if err != nil {
@@ -92,6 +110,19 @@ func LoadRemoteConfig(reg RegistryConfig, serviceName string, cfg any) error {
 // WatchRemoteConfig watches the service config key for changes and calls
 // onChange with new raw bytes. Blocks until ctx is cancelled.
 func WatchRemoteConfig(ctx context.Context, reg RegistryConfig, serviceName string, onChange func([]byte)) error {
+	serviceName = strings.TrimSpace(serviceName)
+	if reg.registryType() != "etcd" && reg.registryType() != "consul" {
+		return fmt.Errorf("remote config: unsupported type %q", reg.Type)
+	}
+	if err := validateRemoteConfigInputs(reg, serviceName); err != nil {
+		return err
+	}
+	if onChange == nil {
+		return errors.New("remote config: onChange callback is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	key := reg.resolveConfigKey(serviceName)
 	return watchRemoteConfigKey(ctx, reg, key, onChange)
 }
@@ -100,6 +131,19 @@ func WatchRemoteConfig(ctx context.Context, reg RegistryConfig, serviceName stri
 // key. It calls onChange when either key changes, so callers can rebuild the
 // full local → service → node merge.
 func WatchRemoteConfigTree(ctx context.Context, reg RegistryConfig, serviceName string, onChange func()) error {
+	serviceName = strings.TrimSpace(serviceName)
+	if reg.registryType() != "etcd" && reg.registryType() != "consul" {
+		return fmt.Errorf("remote config: unsupported type %q", reg.Type)
+	}
+	if err := validateRemoteConfigInputs(reg, serviceName); err != nil {
+		return err
+	}
+	if onChange == nil {
+		return errors.New("remote config: onChange callback is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	keys := []string{reg.resolveConfigKey(serviceName)}
 	if nodeKey := reg.resolveConfigNodeKey(serviceName); nodeKey != "" {
 		keys = append(keys, nodeKey)
@@ -161,6 +205,13 @@ func MergeRemoteConfigOptional(reg RegistryConfig, serviceName string, base *Con
 }
 
 func mergeRemoteConfig(reg RegistryConfig, serviceName string, base *Config, allowMissingService bool) error {
+	serviceName = strings.TrimSpace(serviceName)
+	if err := validateRemoteConfigInputs(reg, serviceName); err != nil {
+		return err
+	}
+	if base == nil {
+		return errors.New("remote config: base config is nil")
+	}
 	svcKey := reg.resolveConfigKey(serviceName)
 
 	// Layer 1: service shared config
@@ -243,7 +294,7 @@ func remoteEtcdClient(reg RegistryConfig) (*clientv3.Client, error) {
 	}
 	return clientv3.New(clientv3.Config{
 		Endpoints:   reg.Endpoints,
-		DialTimeout: 5 * time.Second,
+		DialTimeout: reg.dialTimeout(),
 		TLS:         tlsConfig,
 		Username:    reg.Username,
 		Password:    reg.Password,
@@ -257,7 +308,7 @@ func fetchEtcd(reg RegistryConfig, key string) ([]byte, error) {
 	}
 	defer cli.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), reg.dialTimeout())
 	defer cancel()
 
 	resp, err := cli.Get(ctx, key)
@@ -362,6 +413,14 @@ func remoteConsulClient(reg RegistryConfig) (*consul.Client, error) {
 			KeyFile:  reg.TLS.KeyFile,
 		}
 	}
+	httpClient, err := consul.NewHttpClient(cfg.Transport, cfg.TLSConfig)
+	if err != nil {
+		return nil, fmt.Errorf("remote config: consul HTTP client: %w", err)
+	}
+	// Consul KV watches use a 55-second blocking query. The client timeout must
+	// exceed that interval; fetches still use reg.dialTimeout() via context.
+	httpClient.Timeout = 60 * time.Second
+	cfg.HttpClient = httpClient
 	return consul.NewClient(cfg)
 }
 
@@ -370,7 +429,7 @@ func fetchConsul(reg RegistryConfig, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), reg.dialTimeout())
 	defer cancel()
 	pair, _, err := cli.KV().Get(key, (&consul.QueryOptions{}).WithContext(ctx))
 	if err != nil {
@@ -414,6 +473,9 @@ func watchConsul(ctx context.Context, reg RegistryConfig, key string, onChange f
 		if meta != nil && meta.LastIndex != lastIndex {
 			lastIndex = meta.LastIndex
 			if pair != nil {
+				if err := validateRemoteConfigPayload(pair.Value); err != nil {
+					return err
+				}
 				onChange(pair.Value)
 			} else {
 				onChange(nil)
@@ -482,8 +544,25 @@ func sensitiveRemotePath(settings map[string]any) string {
 	return walk(settings, nil)
 }
 
+func validateRemoteConfigInputs(reg RegistryConfig, serviceName string) error {
+	if serviceName == "" || len(serviceName) > 128 || strings.Contains(serviceName, "/") || strings.ContainsAny(serviceName, "\r\n\x00") {
+		return fmt.Errorf("remote config: invalid service name %q", serviceName)
+	}
+	if len(reg.ConfigKey) > 256 || strings.ContainsAny(reg.ConfigKey, "\r\n\x00") || strings.Contains(reg.ConfigKey, "..") {
+		return fmt.Errorf("remote config: invalid config key")
+	}
+	node := reg.configNode()
+	if node != "" && (len(node) > 128 || strings.ContainsAny(node, "/\r\n\x00")) {
+		return fmt.Errorf("remote config: invalid config node")
+	}
+	return nil
+}
+
 func isSensitiveConfigPath(path []string) bool {
 	if len(path) >= 3 && path[0] == "database" && path[len(path)-1] == "dsn" {
+		return true
+	}
+	if len(path) == 3 && path[0] == "diagnostics" && path[1] == "pprof" && path[2] == "authtoken" {
 		return true
 	}
 	if len(path) != 2 {
@@ -492,5 +571,6 @@ func isSensitiveConfigPath(path []string) bool {
 	return (path[0] == "redis" && path[1] == "password") ||
 		(path[0] == "jwt" && path[1] == "secret") ||
 		(path[0] == "registry" && path[1] == "token") ||
+		(path[0] == "registry" && path[1] == "password") ||
 		(path[0] == "notify" && path[1] == "token")
 }

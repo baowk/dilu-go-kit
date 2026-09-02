@@ -109,6 +109,28 @@ func TestHandlerFromEnvAcceptsAllowedCIDR(t *testing.T) {
 	}
 }
 
+func TestHandlerWithAccessFailsClosedWithoutPolicy(t *testing.T) {
+	h := HandlerWithAccess("", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	resp := httptest.NewRecorder()
+	h(localContext(resp, req))
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("unconfigured metrics handler status = %d, want %d", resp.Code, http.StatusForbidden)
+	}
+}
+
+func TestHandlerWithAccessFailsClosedWithInvalidCIDR(t *testing.T) {
+	h := HandlerWithAccess("", []string{"invalid", "0.0.0.0/0"})
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
+	resp := httptest.NewRecorder()
+	h(localContext(resp, req))
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("invalid CIDR status = %d, want %d", resp.Code, http.StatusForbidden)
+	}
+}
+
 func localContext(resp http.ResponseWriter, req *http.Request) *gin.Context {
 	c, _ := gin.CreateTestContext(resp)
 	c.Request = req

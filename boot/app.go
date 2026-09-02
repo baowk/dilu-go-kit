@@ -68,6 +68,7 @@ type App struct {
 	readinessMu       sync.RWMutex
 	readinessChecks   map[string]func(context.Context) error
 	readinessEvalMu   sync.Mutex
+	readinessInFlight atomic.Int32
 	readinessCacheMu  sync.RWMutex
 	readinessCachedAt time.Time
 	readinessCachedOK bool
@@ -301,6 +302,7 @@ func New(cfgPath string) (*App, error) {
 			DialTimeout:             cfg.Registry.DialTimeout,
 			CheckType:               cfg.Registry.consulCheckType(),
 			CheckPath:               cfg.Registry.CheckPath,
+			CheckTLS:                cfg.Registry.CheckTLS,
 			DeregisterCriticalAfter: cfg.Registry.DeregisterCriticalAfter,
 			TLS:                     cfg.Registry.TLS,
 		})
@@ -383,7 +385,10 @@ func (a *App) Run(setup SetupFunc) error {
 	}
 
 	a.httpServer = newHTTPServer(cfg.Server, a.Gin)
-	serveErr := make(chan error, 2)
+	// HTTP, gRPC, and the optional diagnostics listener may all report a
+	// terminal serve error; keep the channel buffered for every listener so a
+	// secondary failure cannot strand its goroutine during shutdown.
+	serveErr := make(chan error, 3)
 	go func() {
 		if err := a.httpServer.Serve(httpLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- fmt.Errorf("http serve: %w", err)
@@ -402,9 +407,21 @@ func (a *App) Run(setup SetupFunc) error {
 			_ = a.shutdown(cfg)
 			return fmt.Errorf("pprof listen %s: %w", cfg.Diagnostics.Pprof.Addr, listenErr)
 		}
-		a.diagnosticServer = &http.Server{Addr: cfg.Diagnostics.Pprof.Addr, Handler: diagnostics.HandlerWithAccess(cfg.Diagnostics.Pprof.Prefix, cfg.Diagnostics.Pprof.AuthToken, splitCIDRs(cfg.Diagnostics.Pprof.AllowedCIDRs)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+		diagTLS, tlsErr := cfg.Diagnostics.Pprof.TLS.ServerTLSConfig()
+		if tlsErr != nil {
+			_ = diagLis.Close()
+			_ = a.shutdown(cfg)
+			return tlsErr
+		}
+		a.diagnosticServer = &http.Server{Addr: cfg.Diagnostics.Pprof.Addr, Handler: diagnostics.HandlerWithAccess(cfg.Diagnostics.Pprof.Prefix, cfg.Diagnostics.Pprof.AuthToken, splitCIDRs(cfg.Diagnostics.Pprof.AllowedCIDRs)), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20, TLSConfig: diagTLS}
 		go func() {
-			if err := a.diagnosticServer.Serve(diagLis); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			var err error
+			if diagTLS != nil {
+				err = a.diagnosticServer.ServeTLS(diagLis, "", "")
+			} else {
+				err = a.diagnosticServer.Serve(diagLis)
+			}
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
 				serveErr <- fmt.Errorf("pprof serve: %w", err)
 			}
 		}()
@@ -415,6 +432,7 @@ func (a *App) Run(setup SetupFunc) error {
 		a.registeredName = cfg.Server.Name
 		svc := registry.Service{
 			Name:       cfg.Server.Name,
+			Version:    cfg.Server.Version,
 			InstanceID: a.instanceID,
 			Addr:       resolveAdvertiseAddr(cfg.Server.Addr, cfg.Server.AdvertiseAddr),
 		}
@@ -699,11 +717,22 @@ func (a *App) readinessOK() bool {
 		a.storeReadinessCache(true)
 		return true
 	}
+	// A check that ignores context cannot be forcefully terminated. Do not
+	// start another copy while a previous timed-out check is still running;
+	// this keeps repeated /ready probes from leaking an unbounded number of
+	// goroutines.
+	if a.readinessInFlight.Load() > 0 {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	results := make(chan error, len(checks))
 	for _, check := range checks {
-		go func(check func(context.Context) error) { results <- runReadinessCheck(ctx, check) }(check)
+		a.readinessInFlight.Add(1)
+		go func(check func(context.Context) error) {
+			defer a.readinessInFlight.Add(-1)
+			results <- runReadinessCheck(ctx, check)
+		}(check)
 	}
 	ok := true
 	remaining := len(checks)
@@ -763,12 +792,24 @@ func runComponentStop(ctx context.Context, component Component) (err error) {
 	if component == nil {
 		return nil
 	}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("panic: %v", recovered)
-		}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- fmt.Errorf("panic: %v", recovered)
+			}
+		}()
+		done <- component.Stop(ctx)
 	}()
-	return component.Stop(ctx)
+	select {
+	case err = <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("stop timeout: %w", ctx.Err())
+	}
 }
 
 func (a *App) storeReadinessCache(ok bool) {

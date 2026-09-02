@@ -210,6 +210,7 @@ func NewRedisRateLimiter(cfg RedisRateLimitConfig) *RedisRateLimiter {
 	if keyPrefix == "" {
 		keyPrefix = "ratelimit"
 	}
+	keyPrefix = boundedRateLimitKey(keyPrefix)
 	keyFunc := cfg.KeyFunc
 	if keyFunc == nil {
 		keyFunc = func(c *gin.Context) string { return c.ClientIP() }
@@ -232,13 +233,19 @@ func RedisRateLimit(cfg RedisRateLimitConfig) gin.HandlerFunc {
 func (l *RedisRateLimiter) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if l == nil || l.rdb == nil {
-			c.Next()
+			// A directly constructed Redis limiter with no backend must not
+			// silently disable protection. RateLimitFromConfig handles the
+			// explicit compatibility fallback to memory; this lower-level API
+			// fails closed so misconfiguration cannot become an open endpoint.
+			resp.FailStatus(c, 503, 50002, "限流服务不可用")
+			c.Abort()
 			return
 		}
 		keyPart := l.keyFunc(c)
 		if keyPart == "" {
 			keyPart = c.ClientIP()
 		}
+		keyPart = boundedRateLimitKey(keyPart)
 		key := fmt.Sprintf("%s:%s", l.keyPrefix, keyPart)
 		allowed, err := l.allow(c.Request.Context(), key)
 		if err != nil {

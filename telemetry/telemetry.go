@@ -195,7 +195,10 @@ func (p *Provider) GinMiddleware() gin.HandlerFunc {
 	prop := p.Propagator()
 	return func(c *gin.Context) {
 		ctx := prop.Extract(c.Request.Context(), propagation.HeaderCarrier(c.Request.Header))
-		name := c.Request.Method + " " + c.Request.URL.Path
+		// Use a low-cardinality name until Gin has resolved the route. Raw paths
+		// often contain IDs or attacker-controlled values and must not become
+		// span-name dimensions.
+		name := "HTTP " + c.Request.Method
 		ctx, span := tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindServer))
 		if spanCtx := span.SpanContext(); spanCtx.IsValid() {
 			ctx = kitlog.WithTraceID(ctx, spanCtx.TraceID().String())

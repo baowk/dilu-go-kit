@@ -4,6 +4,7 @@ package boot
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/url"
 	"os"
@@ -40,7 +41,8 @@ type Config struct {
 
 // SecurityConfig controls transport security policy. TLS remains optional by
 // default so local development can use loopback plaintext; setting RequireTLS
-// makes boot reject plaintext Redis, registry, and gRPC transports.
+// makes boot reject plaintext Redis, registry, gRPC, Notify, and dedicated
+// diagnostics transports.
 type SecurityConfig struct {
 	RequireTLS bool `mapstructure:"requireTLS"`
 }
@@ -90,8 +92,10 @@ type AccessLimitConfig struct {
 
 // NotifyConfig describes the WebSocket notification target.
 type NotifyConfig struct {
-	WsURL string `mapstructure:"wsUrl"` // mf-ws internal API base URL
-	Token string `mapstructure:"token"`
+	WsURL           string `mapstructure:"wsUrl"` // mf-ws internal API base URL
+	Token           string `mapstructure:"token"`
+	Timeout         int    `mapstructure:"timeout"`         // request timeout in seconds, default 3
+	MaxPayloadBytes int    `mapstructure:"maxPayloadBytes"` // default 1 MiB, maximum 16 MiB
 }
 
 // RegistryConfig describes the service registry (etcd or consul).
@@ -109,6 +113,7 @@ type RegistryConfig struct {
 	DialTimeout             int                `mapstructure:"dialTimeout"`             // seconds, default 5
 	CheckType               string             `mapstructure:"checkType"`               // consul check: "http" (boot default) or "ttl"
 	CheckPath               string             `mapstructure:"checkPath"`               // consul readiness check path, default "/ready"
+	CheckTLS                bool               `mapstructure:"checkTLS"`                // HTTPS for the service readiness check, independent from registry TLS
 	DeregisterCriticalAfter int                `mapstructure:"deregisterCriticalAfter"` // consul critical deregister delay in seconds, default 300
 	ConfigKey               string             `mapstructure:"configKey"`               // remote config key prefix, e.g. "/config/" → auto appends server.name
 	ConfigNode              string             `mapstructure:"configNode"`              // node ID for per-instance override (optional, or env REMOTE_NODE)
@@ -126,6 +131,7 @@ func (r *RegistryConfig) consulCheckType() string {
 // ServerConfig describes the HTTP server.
 type ServerConfig struct {
 	Name              string   `mapstructure:"name"`
+	Version           string   `mapstructure:"version"`           // service release used by registry filtering
 	Addr              string   `mapstructure:"addr"`              // listen addr, e.g. ":7801"
 	AdvertiseAddr     string   `mapstructure:"advertiseAddr"`     // service discovery addr, e.g. "10.0.1.5:7801"
 	Mode              string   `mapstructure:"mode"`              // "debug" or "release"
@@ -360,6 +366,12 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Server.Name) == "" {
 		return fmt.Errorf("server.name is required")
 	}
+	if len(c.Server.Name) > 128 || strings.Contains(c.Server.Name, "/") || strings.ContainsAny(c.Server.Name, "\r\n\x00") {
+		return fmt.Errorf("server.name is invalid")
+	}
+	if len(c.Server.Version) > 128 || strings.ContainsAny(c.Server.Version, "\r\n\x00") {
+		return fmt.Errorf("server.version is invalid")
+	}
 	if strings.TrimSpace(c.Server.Addr) == "" {
 		return fmt.Errorf("server.addr is required")
 	}
@@ -380,17 +392,29 @@ func (c *Config) Validate() error {
 	if c.Registry.TTL > 24*60*60 || c.Registry.DialTimeout > 5*60 || c.Registry.DeregisterCriticalAfter > 30*24*60*60 {
 		return fmt.Errorf("registry timeout values exceed safe bounds")
 	}
-	if len(c.Registry.Prefix) > 256 || strings.ContainsAny(c.Registry.Prefix, "\r\n\x00") {
+	if len(c.Registry.Prefix) > 256 || strings.ContainsAny(c.Registry.Prefix, "\r\n\x00") || strings.Contains(c.Registry.Prefix, "..") {
 		return fmt.Errorf("registry.prefix is invalid")
 	}
-	if len(c.Registry.ConfigKey) > 256 || strings.ContainsAny(c.Registry.ConfigKey, "\r\n\x00") {
+	if len(c.Registry.ConfigKey) > 256 || strings.ContainsAny(c.Registry.ConfigKey, "\r\n\x00") || strings.Contains(c.Registry.ConfigKey, "..") {
 		return fmt.Errorf("registry.configKey is invalid")
+	}
+	if c.Registry.ConfigNode != "" && (len(c.Registry.ConfigNode) > 128 || strings.ContainsAny(c.Registry.ConfigNode, "/\r\n\x00")) {
+		return fmt.Errorf("registry.configNode is invalid")
 	}
 	if strings.TrimSpace(c.Notify.WsURL) != "" {
 		u, err := url.Parse(strings.TrimSpace(c.Notify.WsURL))
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("notify.wsUrl is invalid")
 		}
+	}
+	if c.Notify.Timeout < 0 || c.Notify.Timeout > 5*60 {
+		return fmt.Errorf("notify.timeout must be between 0 and 300 seconds")
+	}
+	if c.Notify.MaxPayloadBytes < 0 || c.Notify.MaxPayloadBytes > 16<<20 {
+		return fmt.Errorf("notify.maxPayloadBytes must be between 0 and 16777216")
+	}
+	if math.IsNaN(c.Telemetry.SampleRatio) || math.IsInf(c.Telemetry.SampleRatio, 0) || c.Telemetry.SampleRatio < 0 || c.Telemetry.SampleRatio > 1 {
+		return fmt.Errorf("telemetry.sampleRatio must be between 0 and 1")
 	}
 	if c.Diagnostics.Pprof.Enabled && (mode == "release" || mode == "production") {
 		p := c.Diagnostics.Pprof
@@ -400,7 +424,8 @@ func (c *Config) Validate() error {
 			if err != nil {
 				host = addr
 			}
-			if host == "" || (host != "localhost" && net.ParseIP(host) != nil && !net.ParseIP(host).IsLoopback()) {
+			ip := net.ParseIP(host)
+			if host == "" || (!strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback())) {
 				return fmt.Errorf("diagnostics.pprof requires authToken or allowedCidrs when exposed beyond loopback")
 			}
 		}
@@ -410,6 +435,20 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("diagnostics.pprof.allowedCidrs contains invalid CIDR")
 				}
 			}
+		}
+	}
+	if c.Diagnostics.Pprof.TLS.Enable {
+		if !c.Diagnostics.Pprof.Enabled {
+			return fmt.Errorf("diagnostics.pprof.tls requires diagnostics.pprof.enabled")
+		}
+		if strings.TrimSpace(c.Diagnostics.Pprof.Addr) == "" {
+			return fmt.Errorf("diagnostics.pprof.tls requires a dedicated addr")
+		}
+		if c.Diagnostics.Pprof.TLS.CertFile == "" || c.Diagnostics.Pprof.TLS.KeyFile == "" {
+			return fmt.Errorf("diagnostics.pprof.tls certFile and keyFile are required")
+		}
+		if c.Diagnostics.Pprof.TLS.RequireClientCert && c.Diagnostics.Pprof.TLS.CAFile == "" {
+			return fmt.Errorf("diagnostics.pprof.tls caFile is required when requireClientCert is enabled")
 		}
 	}
 	if c.Server.MaxBodyBytes < 0 || c.Server.MaxBodyBytes > 256<<20 {
@@ -489,6 +528,15 @@ func (c *Config) validateTLSRequirements() error {
 	}
 	if c.GRPC.Enable && !c.GRPC.TLS.Enable {
 		return fmt.Errorf("security.requireTLS requires grpc.tls.enable")
+	}
+	if c.Diagnostics.Pprof.Enabled && !c.Diagnostics.Pprof.TLS.Enable {
+		return fmt.Errorf("security.requireTLS requires diagnostics.pprof.tls.enable")
+	}
+	if strings.TrimSpace(c.Notify.WsURL) != "" {
+		u, err := url.Parse(strings.TrimSpace(c.Notify.WsURL))
+		if err != nil || u.Scheme != "https" {
+			return fmt.Errorf("security.requireTLS requires notify.wsUrl to use https")
+		}
 	}
 	return nil
 }

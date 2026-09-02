@@ -138,6 +138,24 @@ func S() *Stores { ... }        // 获取全局实例
 
 ## 三、API 规范
 
+### 契约优先与代码生成
+
+公共 HTTP/gRPC API 必须优先定义在 `api/<service>/v1/*.proto`，不要先写 transport 层再补
+接口文档。仓库根目录的 `buf.yaml` 和 `buf.gen.yaml` 提供统一生成入口：
+
+```bash
+make proto-lint
+make proto-generate
+```
+
+生成代码放在 `gen/`，由 Buf 生成 Go message、gRPC client/server、HTTP Gateway 和 OpenAPI。
+生成文件不可手改；修改接口时先更新 Proto，再运行生成命令，并在 CI 中执行 Buf lint 和
+breaking 检查。AI 编程任务应把业务实现限制在 `biz`、`data`、`service` 和 `server` 层。
+
+新服务可使用 `go run github.com/baowk/dilu-go-kit/cmd/dilu new service NAME` 创建，新资源
+使用 `dilu add resource NAME` 创建完整的 model/store/service/dto/API 文件组。脚手架默认拒绝
+覆盖已有文件，避免 AI 误删业务代码。
+
 ### URL
 
 ```
@@ -267,6 +285,9 @@ conn, _ := grpcx.Dial(addr, grpcx.DialOption{
     RetryMaxAttempts: 3,
     RetryMethods: []string{"/package.QueryService/Get"}, // 仅限幂等方法
 })
+
+// 按注册中心服务名拨号：Resolver 会持续更新健康实例，gRPC 使用 round_robin。
+conn, _ = grpcx.DialService(ctx, app.Registry, "inventory-service", grpcx.DialOption{})
 ```
 
 ### 服务客户端
@@ -351,6 +372,7 @@ err = stream.RunGroupConsumer(ctx, app.Redis, stream.GroupConsumerConfig{
 ```yaml
 server:
   name: my-service
+  version: v1.2.0            # 可选；服务实例版本
   addr: ":8080"                # 监听地址
   # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug             # debug / release
@@ -440,6 +462,8 @@ accessLimit:
 notify:
   wsUrl: "http://mf-ws:9020"  # WebSocket 网关通知地址
   token: ""                    # 使用 NOTIFY_TOKEN 注入
+  timeout: 3                    # 单次请求超时（秒）
+  maxPayloadBytes: 1048576     # 单次事件上限，最大 16 MiB
 
 registry:
   enable: true
@@ -513,6 +537,8 @@ last known good upstreams，并将快照标记为 `stale=true` 后告警。默�
 **本地开发**：`registry.enable: false` 即可关闭，使用静态地址。
 
 **注册地址**：`server.addr` / `grpc.addr` 是监听地址，`advertiseAddr` 是注册给其他服务连接的地址。多机或容器部署建议显式配置 `server.advertiseAddr` / `grpc.advertiseAddr`，也可用 `SERVER_ADVERTISE_ADDR` / `GRPC_ADVERTISE_ADDR` 注入。未显式配置时，框架优先使用 `MF_ADVERTISE_IP`，其次 `POD_IP`，最后才自动探测本机 IP；不要使用 Kubernetes `SERVICE_IP` 注册实例地址。
+
+**版本与标签过滤**：`Service.Version` 是可选的一等版本属性，不配置时保持发现所有实例。消费者可在 `registry.ResolverConfig` 或 `grpcx.DialOption` 中设置 `Version`、`Metadata`，也可提供 `ServiceFilter` 自定义灰度策略。过滤由客户端显式启用，不会因生产者升级而自动切断旧版本连接。
 
 ## 七、远程配置
 

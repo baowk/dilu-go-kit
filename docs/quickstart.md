@@ -6,6 +6,19 @@
 go get github.com/baowk/dilu-go-kit@latest
 ```
 
+## 使用脚手架创建服务
+
+```bash
+go run github.com/baowk/dilu-go-kit/cmd/dilu new service inventory \
+  --dir ./services/inventory --module example.com/inventory
+go run github.com/baowk/dilu-go-kit/cmd/dilu add resource task \
+  --dir ./services/inventory --module inventory
+cd ./services/inventory && make proto-lint && make proto-generate
+```
+
+脚手架生成 Proto、Buf 配置、启动入口以及约定的 `biz/data/service/server` 目录；已有文件
+默认不会覆盖。
+
 ## 5 分钟创建一个服务
 
 ### 1. 项目结构
@@ -94,6 +107,7 @@ func main() {
 # resources/config.dev.yaml
 server:
   name: my-service
+  version: v1.2.0                # 可选；服务发现版本
   addr: ":8080"                  # 监听地址
   # advertiseAddr: "10.0.1.5:8080" # 注册发现地址；空时从 addr 推断
   mode: debug
@@ -105,12 +119,17 @@ telemetry:
   enabled: false                 # 开启后导出 OTLP trace；也可用 OTEL_* 环境变量
   # endpoint: "http://127.0.0.1:4318/v1/traces"
   sampleRatio: 0.1              # 默认 0.1；开发排障时可临时设为 1.0
+  # sampleRatioSet: true        # 需要关闭采样时设 sampleRatio: 0 并显式打开此项
 
 diagnostics:
   pprof:
     enabled: false               # 仅在受保护的管理端点启用
     prefix: "/debug/pprof"
     # addr: "127.0.0.1:6060"    # 配置后使用独立管理端口
+    # tls:                       # 独立端口可启用 HTTPS/mTLS
+    #   enable: true
+    #   certFile: "/etc/tls/diag.crt"
+    #   keyFile: "/etc/tls/diag.key"
 
 # log:                        # 默认 console 输出，可选 file / both
 #   output: both
@@ -152,6 +171,7 @@ registry:
     - "127.0.0.1:2379"
   checkType: http          # boot 中 consul 默认 http，可改为 ttl
   checkPath: "/ready"       # consul readiness check path
+  # checkTLS: true          # 仅当服务自身的 /ready 使用 HTTPS 时开启
   deregisterCriticalAfter: 300 # consul critical 后自动摘除延迟，建议 300-600 秒
   # configKey: "/config/"   # 启用远程配置（自动拼 server.name）
   # tls:                     # 同时用于服务注册和远程配置

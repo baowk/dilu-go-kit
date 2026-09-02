@@ -24,18 +24,23 @@ import (
 
 // Notifier sends events to a target service via HTTP POST.
 type Notifier struct {
-	baseURL string
-	client  *http.Client
-	token   string
+	baseURL         string
+	client          *http.Client
+	token           string
+	timeout         time.Duration
+	maxPayloadBytes int
 }
 
 var global atomic.Pointer[Notifier]
 
 // Config configures a Notifier.
 type Config struct {
-	BaseURL string
-	Token   string
-	Client  *http.Client
+	BaseURL         string
+	Token           string
+	Client          *http.Client
+	RequireTLS      bool
+	Timeout         time.Duration
+	MaxPayloadBytes int
 }
 
 // New creates an instance-scoped notifier.
@@ -48,11 +53,25 @@ func New(cfg Config) (*Notifier, error) {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("notify: invalid base URL %q", cfg.BaseURL)
 	}
+	if cfg.RequireTLS && parsed.Scheme != "https" {
+		return nil, fmt.Errorf("notify: TLS is required for the notifier endpoint")
+	}
 	client := cfg.Client
 	if client == nil {
 		client = &http.Client{Timeout: 3 * time.Second}
 	}
-	return &Notifier{baseURL: baseURL, client: client, token: cfg.Token}, nil
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	maxPayloadBytes := cfg.MaxPayloadBytes
+	if maxPayloadBytes <= 0 {
+		maxPayloadBytes = 1 << 20
+	}
+	if maxPayloadBytes > 16<<20 {
+		maxPayloadBytes = 16 << 20
+	}
+	return &Notifier{baseURL: baseURL, client: client, token: cfg.Token, timeout: timeout, maxPayloadBytes: maxPayloadBytes}, nil
 }
 
 // Init initializes the global notifier. wsBaseURL is the target's internal API
@@ -125,6 +144,9 @@ func (n *Notifier) SendContext(ctx context.Context, resource string, payload any
 	if n == nil {
 		return fmt.Errorf("notify: notifier is nil")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if !validResource(resource) {
 		return fmt.Errorf("notify: invalid resource %q", resource)
 	}
@@ -135,6 +157,14 @@ func (n *Notifier) SendContext(ctx context.Context, resource string, payload any
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("notify: marshal: %w", err)
+	}
+	if len(body) > n.maxPayloadBytes {
+		return fmt.Errorf("notify: payload exceeds %d bytes", n.maxPayloadBytes)
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && n.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, n.timeout)
+		defer cancel()
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))

@@ -5,6 +5,7 @@
 .env.*
 !.env.example
 bin/
+gen/
 dist/
 coverage.out
 coverage.html

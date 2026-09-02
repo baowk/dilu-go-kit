@@ -1,6 +1,8 @@
 package clientx
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,5 +44,23 @@ func TestHTTPClientDoesNotRetryPostByDefault(t *testing.T) {
 	_, err := c.Do(t.Context(), req)
 	if err == nil || calls.Load() != 1 {
 		t.Fatalf("err=%v calls=%d", err, calls.Load())
+	}
+}
+
+func TestHTTPClientLimitsResponseBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("0123456789"))
+	}))
+	defer srv.Close()
+	c := NewHTTPClient(HTTPClientConfig{MaxResponseBodyBytes: 4})
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	resp, err := c.Do(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, err = io.ReadAll(resp.Body)
+	if err == nil || !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("ReadAll error = %v, want ErrResponseBodyTooLarge", err)
 	}
 }

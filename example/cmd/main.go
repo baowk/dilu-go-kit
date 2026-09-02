@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/baowk/dilu-go-kit/boot"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/router"
@@ -70,7 +71,10 @@ func main() {
 
 func applyNotifyConfig(cfg *boot.Config) error {
 	return notify.InitConfig(notify.Config{
-		BaseURL: cfg.Notify.WsURL,
-		Token:   cfg.Notify.Token,
+		BaseURL:         cfg.Notify.WsURL,
+		Token:           cfg.Notify.Token,
+		RequireTLS:      cfg.Security.RequireTLS,
+		Timeout:         time.Duration(cfg.Notify.Timeout) * time.Second,
+		MaxPayloadBytes: cfg.Notify.MaxPayloadBytes,
 	})
 }

@@ -1,10 +1,13 @@
 package mid
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"time"
 
 	kitlog "github.com/baowk/dilu-go-kit/log"
+	"github.com/baowk/dilu-go-kit/resp"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
@@ -63,7 +66,8 @@ func RateLimitFromConfig(cfg AccessLimitCfg) gin.HandlerFunc {
 		dur = 5
 	}
 	window := time.Duration(dur) * time.Second
-	if strings.EqualFold(strings.TrimSpace(cfg.Backend), "redis") && cfg.Redis != nil {
+	backend := strings.ToLower(strings.TrimSpace(cfg.Backend))
+	if backend == "redis" && cfg.Redis != nil {
 		return RedisRateLimit(RedisRateLimitConfig{
 			Client:    cfg.Redis,
 			Max:       total,
@@ -71,8 +75,24 @@ func RateLimitFromConfig(cfg AccessLimitCfg) gin.HandlerFunc {
 			KeyPrefix: cfg.KeyPrefix,
 		})
 	}
-	if strings.EqualFold(strings.TrimSpace(cfg.Backend), "redis") && cfg.Redis == nil {
+	if backend == "redis" && cfg.Redis == nil {
 		kitlog.Warn("redis rate limiter unavailable; falling back to bounded in-memory limiter")
+		return RateLimit(total, window)
 	}
-	return RateLimit(total, window)
+	if backend == "" || backend == "memory" {
+		return RateLimit(total, window)
+	}
+	kitlog.Error("unknown rate limiter backend; refusing to silently fall back", "backend", cfg.Backend)
+	return func(c *gin.Context) {
+		resp.FailStatus(c, 503, 50002, "限流服务配置错误")
+		c.Abort()
+	}
+}
+
+func boundedRateLimitKey(value string) string {
+	if len(value) <= 256 {
+		return value
+	}
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }

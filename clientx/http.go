@@ -28,19 +28,23 @@ type HTTPClientConfig struct {
 	ServiceName        string
 	RetryNonIdempotent bool
 	MaxBodyBytes       int64
+	// MaxResponseBodyBytes bounds successful response bodies returned to the
+	// caller; zero uses a 10 MiB default.
+	MaxResponseBodyBytes int64
 }
 
 // HTTPClient applies timeout, retry, circuit breaking and trace propagation
 // consistently to outbound HTTP calls.
 type HTTPClient struct {
-	client             *http.Client
-	timeout            time.Duration
-	retry              RetryConfig
-	breaker            *Breaker
-	telemetry          *telemetry.Provider
-	serviceName        string
-	retryNonIdempotent bool
-	maxBodyBytes       int64
+	client               *http.Client
+	timeout              time.Duration
+	retry                RetryConfig
+	breaker              *Breaker
+	telemetry            *telemetry.Provider
+	serviceName          string
+	retryNonIdempotent   bool
+	maxBodyBytes         int64
+	maxResponseBodyBytes int64
 }
 
 // NewHTTPClient creates a governed HTTP client. The default retry policy only
@@ -79,8 +83,15 @@ func NewHTTPClient(cfg HTTPClientConfig) *HTTPClient {
 	if maxBodyBytes > 256<<20 {
 		maxBodyBytes = 256 << 20
 	}
+	maxResponseBodyBytes := cfg.MaxResponseBodyBytes
+	if maxResponseBodyBytes <= 0 {
+		maxResponseBodyBytes = 10 << 20
+	}
+	if maxResponseBodyBytes > 256<<20 {
+		maxResponseBodyBytes = 256 << 20
+	}
 	return &HTTPClient{client: client, timeout: timeout, retry: retry, breaker: cfg.Breaker,
-		telemetry: cfg.Telemetry, serviceName: strings.TrimSpace(cfg.ServiceName), retryNonIdempotent: cfg.RetryNonIdempotent, maxBodyBytes: maxBodyBytes}
+		telemetry: cfg.Telemetry, serviceName: strings.TrimSpace(cfg.ServiceName), retryNonIdempotent: cfg.RetryNonIdempotent, maxBodyBytes: maxBodyBytes, maxResponseBodyBytes: maxResponseBodyBytes}
 }
 
 // HTTPStatusError reports a non-success HTTP response after request execution.
@@ -144,6 +155,7 @@ func (c *HTTPClient) Do(ctx context.Context, req *http.Request) (*http.Response,
 }
 
 var ErrRequestBodyTooLarge = errors.New("clientx: request body exceeds configured limit")
+var ErrResponseBodyTooLarge = errors.New("clientx: response body exceeds configured limit")
 
 func (c *HTTPClient) doWithResponse(ctx context.Context, req *http.Request, body []byte, result **http.Response) error {
 	if !c.retryNonIdempotent && !isIdempotent(req.Method) {
@@ -158,6 +170,10 @@ func (c *HTTPClient) single(ctx context.Context, req *http.Request, body []byte,
 	defer func() { metrics.ObserveDependency(c.serviceName, req.Method, statusLabel, time.Since(start)) }()
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
+	maxResponseBodyBytes := c.maxResponseBodyBytes
+	if maxResponseBodyBytes <= 0 {
+		maxResponseBodyBytes = 10 << 20
+	}
 	attemptReq := req.Clone(callCtx)
 	if body != nil {
 		attemptReq.Body = io.NopCloser(bytes.NewReader(body))
@@ -188,6 +204,7 @@ func (c *HTTPClient) single(ctx context.Context, req *http.Request, body []byte,
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		statusLabel = fmt.Sprintf("%d", resp.StatusCode)
+		_, _ = io.CopyN(io.Discard, resp.Body, maxResponseBodyBytes)
 		_ = resp.Body.Close()
 		if span != nil {
 			span.RecordError(&HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status})
@@ -196,8 +213,37 @@ func (c *HTTPClient) single(ctx context.Context, req *http.Request, body []byte,
 		return &HTTPStatusError{StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 	statusLabel = "ok"
+	resp.Body = &limitedResponseBody{ReadCloser: resp.Body, remaining: maxResponseBodyBytes}
 	*result = resp
 	return nil
+}
+
+type limitedResponseBody struct {
+	io.ReadCloser
+	remaining int64
+}
+
+func (b *limitedResponseBody) Read(p []byte) (int, error) {
+	if b == nil || b.ReadCloser == nil {
+		return 0, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if b.remaining == 0 {
+		var probe [1]byte
+		n, err := b.ReadCloser.Read(probe[:])
+		if n > 0 {
+			return 0, ErrResponseBodyTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:int(b.remaining)]
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.remaining -= int64(n)
+	return n, err
 }
 
 func isIdempotent(method string) bool {

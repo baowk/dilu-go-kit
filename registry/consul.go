@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,7 +86,10 @@ func consulConfig(addr, token string, tlsOptions ...TLSConfig) *consul.Config {
 		}
 	}
 	if httpClient, err := consul.NewHttpClient(cfg.Transport, cfg.TLSConfig); err == nil {
-		httpClient.Timeout = 5 * time.Second
+		// Watch uses Consul blocking queries (up to 30s). Keep a transport
+		// deadline longer than the long-poll interval; individual startup and
+		// API calls still receive caller contexts with bounded deadlines.
+		httpClient.Timeout = 60 * time.Second
 		cfg.HttpClient = httpClient
 	}
 	return cfg
@@ -107,6 +111,9 @@ func consulProbeConfigWithTLS(addr, token string, tlsOptions TLSConfig, timeout 
 }
 
 func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if svc.InstanceID == "" {
 		svc.InstanceID = GenerateInstanceID(svc.Name)
 	}
@@ -139,6 +146,11 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 	for k, v := range svc.Meta {
 		meta[k] = v
 	}
+	// Consul has no first-class version field; persist it as metadata so
+	// version filters work consistently across etcd and Consul backends.
+	if svc.Version != "" {
+		meta["version"] = svc.Version
+	}
 	if svc.GRPCAddr != "" {
 		meta["grpc_addr"] = svc.GRPCAddr
 	}
@@ -153,15 +165,15 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		Check:   check,
 	}
 
-	if err := r.client.Agent().ServiceRegister(reg); err != nil {
+	if err := r.client.Agent().ServiceRegisterOpts(reg, consul.ServiceRegisterOpts{}.WithContext(ctx)); err != nil {
 		return fmt.Errorf("registry: consul register: %w", err)
 	}
 
 	var ttlCancel context.CancelFunc
 	var ttlCtx context.Context
 	if usesTTL {
-		if err := r.client.Agent().PassTTL(checkID, "initial"); err != nil {
-			_ = r.client.Agent().ServiceDeregister(svc.InstanceID)
+		if err := r.client.Agent().UpdateTTLOpts(checkID, "initial", consul.HealthPassing, (&consul.QueryOptions{}).WithContext(ctx)); err != nil {
+			_ = r.client.Agent().ServiceDeregisterOpts(svc.InstanceID, (&consul.QueryOptions{}).WithContext(ctx))
 			return fmt.Errorf("registry: consul pass ttl: %w", err)
 		}
 		ttlCtx, ttlCancel = context.WithCancel(context.Background())
@@ -211,7 +223,10 @@ func consulServiceCheck(cfg Config, checkID, checkAddr string) (*consul.AgentSer
 	}
 	if checkType == "http" {
 		ttl := cfg.ttl()
-		check.HTTP = consulCheckURL(checkAddr, cfg.checkPath(), cfg.TLS.Enable)
+		// The service health endpoint is a separate transport from the Consul
+		// API. Do not infer its scheme from registry TLS; most services expose
+		// plain HTTP readiness even when Consul itself uses HTTPS.
+		check.HTTP = consulCheckURL(checkAddr, cfg.checkPath(), cfg.CheckTLS)
 		check.Interval = fmt.Sprintf("%ds", ttl)
 		check.Timeout = fmt.Sprintf("%ds", minInt64(5, ttl))
 		return check, false, nil
@@ -228,7 +243,7 @@ func (r *consulRegistry) refreshTTL(ctx context.Context, svc Service, checkID st
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.client.Agent().PassTTL(checkID, "alive"); err != nil {
+			if err := r.client.Agent().UpdateTTLOpts(checkID, "alive", consul.HealthPassing, (&consul.QueryOptions{}).WithContext(ctx)); err != nil {
 				slog.Warn("registry: consul ttl refresh failed",
 					"service", svc.Name, "instance", svc.InstanceID, "error", err)
 			}
@@ -265,6 +280,16 @@ func minInt64(a, b int64) int64 {
 }
 
 func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	name = strings.TrimSpace(name)
+	if err := validateServiceName(name); err != nil {
+		return err
+	}
+	if instanceID == "" || len(instanceID) > 256 || strings.Contains(instanceID, "/") || strings.ContainsAny(instanceID, "\r\n\x00") {
+		return fmt.Errorf("registry: invalid instance ID %q", instanceID)
+	}
 	r.mu.Lock()
 	if cancel, ok := r.cancels[instanceID]; ok {
 		cancel()
@@ -273,7 +298,7 @@ func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string
 	delete(r.checks, instanceID)
 	r.mu.Unlock()
 
-	if err := r.client.Agent().ServiceDeregister(instanceID); err != nil {
+	if err := r.client.Agent().ServiceDeregisterOpts(instanceID, (&consul.QueryOptions{}).WithContext(ctx)); err != nil {
 		return fmt.Errorf("registry: consul deregister: %w", err)
 	}
 
@@ -282,6 +307,13 @@ func (r *consulRegistry) Deregister(ctx context.Context, name, instanceID string
 }
 
 func (r *consulRegistry) Discover(ctx context.Context, name string) ([]Service, error) {
+	name = strings.TrimSpace(name)
+	if err := validateServiceName(name); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	services, _, err := r.discover(ctx, name, &consul.QueryOptions{})
 	if err != nil {
 		return nil, err
@@ -313,7 +345,13 @@ func (r *consulRegistry) discover(ctx context.Context, name string, query *consu
 				}
 			default:
 				svc.Meta[k] = v
+				if k == "version" {
+					svc.Version = v
+				}
 			}
+		}
+		if svc.Name != name || validateService(svc) != nil {
+			continue
 		}
 		services = append(services, svc)
 	}
@@ -324,6 +362,13 @@ func (r *consulRegistry) discover(ctx context.Context, name string, query *consu
 }
 
 func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, error) {
+	name = strings.TrimSpace(name)
+	if err := validateServiceName(name); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ch := make(chan Event, 32)
 
 	// First send current state
@@ -388,7 +433,13 @@ func (r *consulRegistry) Watch(ctx context.Context, name string) (<-chan Event, 
 						}
 					default:
 						svc.Meta[k] = v
+						if k == "version" {
+							svc.Version = v
+						}
 					}
+				}
+				if svc.Name != name || validateService(svc) != nil {
+					continue
 				}
 				seen[id] = svc
 
@@ -431,9 +482,12 @@ func (r *consulRegistry) Close() error {
 	r.mu.Unlock()
 	r.wg.Wait()
 
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.dialTimeout())
+	defer cancel()
 	for instanceID, checkID := range checks {
-		_ = r.client.Agent().ServiceDeregister(instanceID)
-		_ = r.client.Agent().CheckDeregister(checkID)
+		q := (&consul.QueryOptions{}).WithContext(ctx)
+		_ = r.client.Agent().ServiceDeregisterOpts(instanceID, q)
+		_ = r.client.Agent().CheckDeregisterOpts(checkID, q)
 	}
 	return nil
 }

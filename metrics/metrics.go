@@ -209,8 +209,9 @@ func Handler() gin.HandlerFunc {
 func HandlerWithAccess(token string, allowedCIDRs []string) gin.HandlerFunc {
 	ensureCollectors()
 	h := promhttp.Handler()
+	allowed, invalid := parseCIDRs(allowedCIDRs)
 	return func(c *gin.Context) {
-		if !metricsAccessAllowed(c.Request, token, allowedCIDRs) {
+		if !metricsAccessAllowed(c.Request, token, allowed, invalid) {
 			c.AbortWithStatus(http.StatusForbidden)
 			return
 		}
@@ -243,7 +244,10 @@ func splitCIDRs(value string) []string {
 	return out
 }
 
-func metricsAccessAllowed(r *http.Request, token string, allowedCIDRs []string) bool {
+func metricsAccessAllowed(r *http.Request, token string, allowed []*net.IPNet, invalid bool) bool {
+	if invalid {
+		return false
+	}
 	if token != "" {
 		value := strings.TrimSpace(r.Header.Get("Authorization"))
 		const prefix = "Bearer "
@@ -255,8 +259,11 @@ func metricsAccessAllowed(r *http.Request, token string, allowedCIDRs []string) 
 			return false
 		}
 	}
-	if len(allowedCIDRs) == 0 {
-		return true
+	if len(allowed) == 0 {
+		// An unconfigured direct handler must never become a public metrics
+		// endpoint. HandlerFromEnv supplies loopback by default; callers using
+		// HandlerWithAccess must explicitly provide a token or CIDR.
+		return token != ""
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -266,13 +273,31 @@ func metricsAccessAllowed(r *http.Request, token string, allowedCIDRs []string) 
 	if ip == nil {
 		return false
 	}
-	for _, value := range allowedCIDRs {
-		_, network, err := net.ParseCIDR(strings.TrimSpace(value))
-		if err == nil && network.Contains(ip) {
+	for _, network := range allowed {
+		if network.Contains(ip) {
 			return true
 		}
 	}
 	return false
+}
+
+func parseCIDRs(values []string) ([]*net.IPNet, bool) {
+	allowed := make([]*net.IPNet, 0, len(values))
+	invalid := false
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			invalid = true
+			continue
+		}
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			invalid = true
+			continue
+		}
+		allowed = append(allowed, network)
+	}
+	return allowed, invalid
 }
 
 // GRPCUnaryServerInterceptor records unary gRPC latency and status codes.

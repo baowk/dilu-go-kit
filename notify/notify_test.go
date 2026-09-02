@@ -47,3 +47,19 @@ func TestInitEmptyClearsGlobalNotifier(t *testing.T) {
 		t.Fatal("expected not initialized error")
 	}
 }
+
+func TestNotifierRequireTLS(t *testing.T) {
+	if _, err := New(Config{BaseURL: "http://example.com", RequireTLS: true}); err == nil {
+		t.Fatal("expected TLS requirement to reject HTTP endpoint")
+	}
+}
+
+func TestNotifierRejectsOversizedPayload(t *testing.T) {
+	n, err := New(Config{BaseURL: "http://example.com", MaxPayloadBytes: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := n.SendContext(context.Background(), "task", map[string]any{"payload": "too-large"}); err == nil {
+		t.Fatal("expected oversized payload error")
+	}
+}

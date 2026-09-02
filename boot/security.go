@@ -32,4 +32,10 @@ func warnPlaintextTransports(cfg *Config) {
 	if cfg.GRPC.Enable && !cfg.GRPC.TLS.Enable {
 		warn("grpc")
 	}
+	if strings.TrimSpace(cfg.Notify.WsURL) != "" && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.Notify.WsURL)), "https://") {
+		warn("notify")
+	}
+	if cfg.Diagnostics.Pprof.Enabled && strings.TrimSpace(cfg.Diagnostics.Pprof.Addr) != "" && !cfg.Diagnostics.Pprof.TLS.Enable {
+		warn("pprof")
+	}
 }

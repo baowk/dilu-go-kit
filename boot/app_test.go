@@ -222,3 +222,30 @@ func TestReadinessCheckPanicAndContextHangDoNotCrashOrBlock(t *testing.T) {
 		t.Fatal("readiness check exceeded bounded timeout")
 	}
 }
+
+func TestRunComponentStopBoundsContextIgnoringComponent(t *testing.T) {
+	stopRelease := make(chan struct{})
+	component := &blockingStopComponent{release: stopRelease}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := runComponentStop(ctx, component)
+	if err == nil || !strings.Contains(err.Error(), "stop timeout") {
+		t.Fatalf("stop error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("stop exceeded bound: %s", elapsed)
+	}
+	close(stopRelease)
+}
+
+type blockingStopComponent struct {
+	release chan struct{}
+}
+
+func (c *blockingStopComponent) Name() string                { return "blocking-stop" }
+func (c *blockingStopComponent) Start(context.Context) error { return nil }
+func (c *blockingStopComponent) Stop(context.Context) error {
+	<-c.release
+	return nil
+}

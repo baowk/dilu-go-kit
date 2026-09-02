@@ -21,11 +21,18 @@ const (
 
 // ResolverConfig configures a client-side service resolver.
 type ResolverConfig struct {
-	Registry         Registry
-	Service          string
-	Policy           BalancePolicy
-	StaleGracePeriod time.Duration
-	ResyncInterval   time.Duration
+	Registry Registry
+	Service  string
+	Policy   BalancePolicy
+	// Version optionally restricts resolution to a service release.
+	Version string
+	// Metadata optionally requires exact key/value labels on instances.
+	Metadata map[string]string
+	// Filter is an additional custom instance filter.
+	Filter                  ServiceFilter
+	StaleGracePeriod        time.Duration
+	ResyncInterval          time.Duration
+	InitialDiscoveryTimeout time.Duration
 }
 
 // Resolver watches a service and selects healthy instances from a local cache.
@@ -53,8 +60,10 @@ func NewResolver(ctx context.Context, cfg ResolverConfig) (*Resolver, error) {
 	}
 	watchCtx, cancel := context.WithCancel(ctx)
 	snapshots, err := WatchUpstreamsWithOptions(watchCtx, cfg.Registry, cfg.Service, WatchUpstreamsOptions{
-		StaleGracePeriod: cfg.StaleGracePeriod,
-		ResyncInterval:   cfg.ResyncInterval,
+		StaleGracePeriod:        cfg.StaleGracePeriod,
+		ResyncInterval:          cfg.ResyncInterval,
+		InitialDiscoveryTimeout: cfg.InitialDiscoveryTimeout,
+		Filter:                  AndFilters(VersionFilter(cfg.Version), MetadataFilter(cfg.Metadata), cfg.Filter),
 	})
 	if err != nil {
 		cancel()

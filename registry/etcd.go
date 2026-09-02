@@ -69,6 +69,9 @@ func NewEtcd(cfg Config) (Registry, error) {
 }
 
 func (r *etcdRegistry) Register(ctx context.Context, svc Service) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if svc.InstanceID == "" {
 		svc.InstanceID = GenerateInstanceID(svc.Name)
 	}
@@ -172,6 +175,16 @@ func (r *etcdRegistry) keepAliveLoop(ctx context.Context, svc Service, leaseID c
 }
 
 func (r *etcdRegistry) Deregister(ctx context.Context, name, instanceID string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	name = strings.TrimSpace(name)
+	if err := validateServiceName(name); err != nil {
+		return err
+	}
+	if instanceID == "" || len(instanceID) > 256 || strings.Contains(instanceID, "/") || strings.ContainsAny(instanceID, "\r\n\x00") {
+		return fmt.Errorf("registry: invalid instance ID %q", instanceID)
+	}
 	r.mu.Lock()
 	var leaseID clientv3.LeaseID
 	if cancel, ok := r.cancels[instanceID]; ok {
@@ -209,6 +222,10 @@ func wrapError(message string, err error) error {
 }
 
 func (r *etcdRegistry) Discover(ctx context.Context, name string) ([]Service, error) {
+	name = strings.TrimSpace(name)
+	if err := validateServiceName(name); err != nil {
+		return nil, err
+	}
 	prefix := servicePrefixKey(r.cfg.prefix(), name)
 	resp, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
@@ -217,9 +234,18 @@ func (r *etcdRegistry) Discover(ctx context.Context, name string) ([]Service, er
 
 	services := make([]Service, 0, len(resp.Kvs))
 	for _, kv := range resp.Kvs {
+		keyInstanceID, ok := serviceInstanceFromKey(prefix, kv.Key)
+		if !ok {
+			slog.Warn("registry: invalid service key", "key", string(kv.Key))
+			continue
+		}
 		svc, err := unmarshalService(kv.Value)
 		if err != nil {
 			slog.Warn("registry: invalid service data", "key", string(kv.Key), "error", err)
+			continue
+		}
+		if svc.Name != name || svc.InstanceID != keyInstanceID || validateService(svc) != nil {
+			slog.Warn("registry: invalid service data", "key", string(kv.Key), "expected", name, "actual", svc.Name)
 			continue
 		}
 		services = append(services, svc)
@@ -228,6 +254,13 @@ func (r *etcdRegistry) Discover(ctx context.Context, name string) ([]Service, er
 }
 
 func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, error) {
+	name = strings.TrimSpace(name)
+	if err := validateServiceName(name); err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	prefix := servicePrefixKey(r.cfg.prefix(), name)
 	snapshot, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
@@ -240,8 +273,12 @@ func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, er
 		for ctx.Err() == nil {
 			current := make(map[string]Service, len(snapshot.Kvs))
 			for _, kv := range snapshot.Kvs {
+				keyInstanceID, ok := serviceInstanceFromKey(prefix, kv.Key)
+				if !ok {
+					continue
+				}
 				svc, err := unmarshalService(kv.Value)
-				if err != nil {
+				if err != nil || svc.Name != name || svc.InstanceID != keyInstanceID || validateService(svc) != nil {
 					continue
 				}
 				current[svc.InstanceID] = svc
@@ -304,22 +341,36 @@ func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, er
 
 func etcdEvent(prefix, name string, ev *clientv3.Event) (Event, bool) {
 	if ev.Type == clientv3.EventTypePut && ev.Kv != nil {
+		keyInstanceID, keyOK := serviceInstanceFromKey(prefix, ev.Kv.Key)
 		svc, err := unmarshalService(ev.Kv.Value)
-		return Event{Type: EventPut, Service: svc}, err == nil
+		return Event{Type: EventPut, Service: svc}, err == nil && keyOK && svc.Name == name && svc.InstanceID == keyInstanceID && validateService(svc) == nil
 	}
 	if ev.Type == clientv3.EventTypeDelete {
 		if ev.PrevKv != nil {
-			if svc, err := unmarshalService(ev.PrevKv.Value); err == nil {
+			keyInstanceID, keyOK := serviceInstanceFromKey(prefix, ev.PrevKv.Key)
+			if svc, err := unmarshalService(ev.PrevKv.Value); err == nil && keyOK && svc.Name == name && svc.InstanceID == keyInstanceID && validateService(svc) == nil {
 				return Event{Type: EventDelete, Service: svc}, true
 			}
 		}
 		instanceID := ""
 		if ev.Kv != nil {
-			instanceID = strings.TrimPrefix(string(ev.Kv.Key), prefix)
+			instanceID, _ = serviceInstanceFromKey(prefix, ev.Kv.Key)
 		}
 		return Event{Type: EventDelete, Service: Service{Name: name, InstanceID: instanceID}}, instanceID != ""
 	}
 	return Event{}, false
+}
+
+func serviceInstanceFromKey(prefix string, key []byte) (string, bool) {
+	keyString := string(key)
+	if prefix == "" || !strings.HasPrefix(keyString, prefix) {
+		return "", false
+	}
+	instanceID := strings.TrimPrefix(keyString, prefix)
+	if instanceID == "" || strings.Contains(instanceID, "/") || strings.ContainsAny(instanceID, "\r\n\x00") || len(instanceID) > 256 {
+		return "", false
+	}
+	return instanceID, true
 }
 
 func sendEvent(ctx context.Context, ch chan<- Event, event Event) bool {

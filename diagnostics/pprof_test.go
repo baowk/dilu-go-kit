@@ -13,9 +13,17 @@ func TestRegisterPprof(t *testing.T) {
 	r := gin.New()
 	RegisterPprof(r, "")
 	w := httptest.NewRecorder()
-	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d", w.Code)
+	}
+}
+
+func TestNormalizePrefixNeverReturnsEmptyPath(t *testing.T) {
+	if got := normalizePrefix("///"); got != "/debug/pprof" {
+		t.Fatalf("normalized empty prefix = %q", got)
 	}
 }
 
@@ -39,5 +47,16 @@ func TestHandlerWithAccessRequiresTokenAndCIDR(t *testing.T) {
 				t.Fatalf("status = %d, want %d", w.Code, tc.want)
 			}
 		})
+	}
+}
+
+func TestHandlerWithAccessFailsClosedOnInvalidCIDR(t *testing.T) {
+	h := HandlerWithAccess("", "", []string{"not-a-cidr"})
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("invalid CIDR status = %d, want %d", w.Code, http.StatusForbidden)
 	}
 }

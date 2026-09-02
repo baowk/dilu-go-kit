@@ -46,11 +46,11 @@ type JWTConfig struct {
 // JWT returns a Gin middleware that verifies Bearer tokens.
 // On success it sets "uid" (int64) in the Gin context.
 func JWT(cfg JWTConfig) gin.HandlerFunc {
-	trustedNetworks := parseTrustedCIDRs(cfg.TrustedHeaderCIDRs)
+	trustedNetworks, trustedCIDRsValid := parseTrustedCIDRs(cfg.TrustedHeaderCIDRs)
 	return func(c *gin.Context) {
 		// Pre-verified by gateway. This is opt-in because identity headers are
 		// trivially spoofable on services that can be reached directly.
-		if cfg.HeaderUID != "" && cfg.TrustHeaderUID && trustedHeaderSourceAllowed(c, trustedNetworks) {
+		if cfg.HeaderUID != "" && cfg.TrustHeaderUID && trustedCIDRsValid && trustedHeaderSourceAllowed(c, trustedNetworks) {
 			if uidStr := c.GetHeader(cfg.HeaderUID); uidStr != "" {
 				uid, _ := strconv.ParseInt(uidStr, 10, 64)
 				if uid > 0 {
@@ -137,15 +137,23 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 	}
 }
 
-func parseTrustedCIDRs(values []string) []*net.IPNet {
+func parseTrustedCIDRs(values []string) ([]*net.IPNet, bool) {
 	out := make([]*net.IPNet, 0, len(values))
+	valid := true
 	for _, value := range values {
-		_, network, err := net.ParseCIDR(strings.TrimSpace(value))
+		value = strings.TrimSpace(value)
+		if value == "" {
+			valid = false
+			continue
+		}
+		_, network, err := net.ParseCIDR(value)
 		if err == nil {
 			out = append(out, network)
+		} else {
+			valid = false
 		}
 	}
-	return out
+	return out, valid
 }
 
 func trustedHeaderSourceAllowed(c *gin.Context, networks []*net.IPNet) bool {

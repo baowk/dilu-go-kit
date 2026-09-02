@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/mid"
+	kitregistry "github.com/baowk/dilu-go-kit/registry"
 	"github.com/baowk/dilu-go-kit/telemetry"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -40,6 +41,15 @@ type DialOption struct {
 	// RequireTLS rejects dialing with insecure credentials when true. This is
 	// useful for callers that derive transport policy from boot.SecurityConfig.
 	RequireTLS bool
+	// Version optionally restricts DialService discovery to this release.
+	// It has no effect when dialing a direct host:port address with Dial.
+	Version string
+	// Metadata optionally requires exact labels on discovered instances.
+	Metadata map[string]string
+	// ServiceFilter adds a custom predicate for DialService discovery.
+	ServiceFilter kitregistry.ServiceFilter
+	// Filter is an alias for ServiceFilter.
+	Filter kitregistry.ServiceFilter
 	// RetryMaxAttempts is the gRPC retry max attempts (default 1, disabled).
 	RetryMaxAttempts int
 	// RetryMethods contains explicitly idempotent full method names, for example
