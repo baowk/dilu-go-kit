@@ -17,6 +17,7 @@
 - 详细规范见 `docs/conventions.md`
 - 快速上手见 `docs/quickstart.md`
 - 示例服务使用 `example/internal/{module}/...`，不要再使用 `internal/modules/{module}`。
+- 依赖注入保持显式构造函数和 `boot.App` 组件注册；不引入 Wire 等编译期 DI 工具。
 
 ## 依赖版本基线与升级
 
@@ -41,6 +42,8 @@
   `go mod verify`、`govulncheck ./...`、`git diff --check`；核心依赖升级再执行
   `go test -count=1 -shuffle=on ./...`。
 - 发布时同步更新 README/CHANGELOG（如存在）的依赖版本说明；生产环境先在 staging 验证。
+- 后台组件如存在启动依赖，应额外实现 `DependsOn() []string`；不得在组件内部通过睡眠或无限重试
+  隐式等待其他服务。身份类 metadata 只能在认证成功后显式写入，不能信任外部请求头。
 
 ## 模块拆分硬约束
 

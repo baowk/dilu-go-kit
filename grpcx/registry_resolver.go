@@ -180,8 +180,8 @@ func dialContextWithResolver(ctx context.Context, addr string, opt DialOption, b
 			Time: opt.KeepaliveTime, Timeout: opt.KeepaliveTimeout, PermitWithoutStream: true,
 		}),
 		grpc.WithDefaultServiceConfig(serviceConfig),
-		grpc.WithChainUnaryInterceptor(mid.GRPCUnaryClientInterceptor()),
-		grpc.WithChainStreamInterceptor(mid.GRPCStreamClientInterceptor()),
+		grpc.WithChainUnaryInterceptor(mid.GRPCUnaryClientInterceptor(), mid.GRPCUnaryClientTimeout(opt.DefaultRequestTimeout)),
+		grpc.WithChainStreamInterceptor(mid.GRPCStreamClientInterceptor(), mid.GRPCStreamClientTimeout(opt.DefaultRequestTimeout)),
 	}
 	if opt.Telemetry != nil {
 		grpcOptions = append(grpcOptions, opt.Telemetry.GRPCDialOption())

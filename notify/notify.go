@@ -179,7 +179,6 @@ func (n *Notifier) SendContext(ctx context.Context, resource string, payload any
 	// Propagate traceId
 	if traceID := log.GetTraceID(ctx); traceID != "" {
 		req.Header.Set("X-Trace-Id", traceID)
-		req.Header.Set("X-Request-Id", traceID)
 	}
 
 	resp, err := n.client.Do(req)

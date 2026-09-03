@@ -102,7 +102,7 @@ type NotifyConfig struct {
 // It also drives optional remote config loading from the same backend.
 type RegistryConfig struct {
 	Enable                  bool               `mapstructure:"enable"`
-	Type                    string             `mapstructure:"type"`                    // "etcd" (default) or "consul"
+	Type                    string             `mapstructure:"type"`                    // "etcd" (default), "consul", or registered backend
 	Endpoints               []string           `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
 	Address                 string             `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
 	Token                   string             `mapstructure:"token"`                   // consul ACL token (optional)
@@ -185,6 +185,8 @@ type GRPCConfig struct {
 	ShutdownTimeout int       `mapstructure:"shutdownTimeout"` // seconds, default 10
 	MaxRecvMsgSize  int       `mapstructure:"maxRecvMsgSize"`  // bytes, default 4 MiB
 	MaxSendMsgSize  int       `mapstructure:"maxSendMsgSize"`  // bytes, default 4 MiB
+	RequestTimeout  int       `mapstructure:"requestTimeout"`  // seconds, zero disables default deadline
+	MaxConcurrent   int       `mapstructure:"maxConcurrent"`   // max in-flight RPCs, zero disables limit
 	TLS             TLSConfig `mapstructure:"tls"`
 }
 
@@ -462,6 +464,12 @@ func (c *Config) Validate() error {
 	}
 	if c.GRPC.MaxRecvMsgSize < 0 || c.GRPC.MaxSendMsgSize < 0 || c.GRPC.MaxRecvMsgSize > 64<<20 || c.GRPC.MaxSendMsgSize > 64<<20 {
 		return fmt.Errorf("grpc message sizes must be between 0 and 67108864")
+	}
+	if c.GRPC.RequestTimeout < 0 || c.GRPC.RequestTimeout > 5*60 {
+		return fmt.Errorf("grpc.requestTimeout must be between 0 and 300 seconds")
+	}
+	if c.GRPC.MaxConcurrent < 0 || c.GRPC.MaxConcurrent > 1_000_000 {
+		return fmt.Errorf("grpc.maxConcurrent must be between 0 and 1000000")
 	}
 	if err := c.validateTLSRequirements(); err != nil {
 		return err

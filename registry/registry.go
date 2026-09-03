@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -383,9 +384,50 @@ func logStaleSnapshot(name string, snapshot UpstreamSnapshot) {
 	)
 }
 
+// Factory creates a Registry implementation from configuration. Applications
+// may register additional backends without changing this package.
+type Factory func(Config) (Registry, error)
+
+var (
+	factoryMu sync.RWMutex
+	factories = map[string]Factory{
+		"etcd":   NewEtcd,
+		"consul": NewConsul,
+	}
+)
+
+// RegisterBackend registers or replaces a named registry backend. Register
+// custom backends during process initialization, before creating an App. The
+// factory is invoked outside the registry lock.
+func RegisterBackend(name string, factory Factory) error {
+	name = normalizeBackendName(name)
+	if name == "" {
+		return fmt.Errorf("registry: backend name must contain only letters, digits, '_' or '-'")
+	}
+	if factory == nil {
+		return fmt.Errorf("registry: backend %q factory is nil", name)
+	}
+	factoryMu.Lock()
+	factories[name] = factory
+	factoryMu.Unlock()
+	return nil
+}
+
+// BackendNames returns the registered backend names in sorted order.
+func BackendNames() []string {
+	factoryMu.RLock()
+	names := make([]string, 0, len(factories))
+	for name := range factories {
+		names = append(names, name)
+	}
+	factoryMu.RUnlock()
+	sort.Strings(names)
+	return names
+}
+
 // Config for the registry.
 type Config struct {
-	Type                    string    `mapstructure:"type"`                    // "etcd" (default) or "consul"
+	Type                    string    `mapstructure:"type"`                    // "etcd" (default), "consul", or a registered backend
 	Endpoints               []string  `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
 	Address                 string    `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
 	Token                   string    `mapstructure:"token"`                   // consul ACL token (optional)
@@ -428,16 +470,33 @@ func (c *Config) registryType() string {
 	return "etcd"
 }
 
-// New creates a registry based on Config.Type ("etcd" or "consul").
+// New creates a registry using the factory registered for Config.Type. The
+// built-in backends are etcd (default) and Consul; applications can register
+// additional implementations with RegisterBackend.
 func New(cfg Config) (Registry, error) {
-	switch cfg.registryType() {
-	case "etcd":
-		return NewEtcd(cfg)
-	case "consul":
-		return NewConsul(cfg)
-	default:
-		return nil, fmt.Errorf("registry: unsupported type %q (expected etcd or consul)", cfg.Type)
+	name := cfg.registryType()
+	factoryMu.RLock()
+	factory := factories[name]
+	factoryMu.RUnlock()
+	if factory == nil {
+		return nil, fmt.Errorf("registry: unsupported type %q (register a backend with registry.RegisterBackend)", cfg.Type)
 	}
+	return factory(cfg)
+}
+
+func normalizeBackendName(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return ""
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' {
+			continue
+		}
+		return ""
+	}
+	return name
 }
 
 func (c *Config) prefix() string {

@@ -102,6 +102,20 @@ type Component interface {
 	Stop(context.Context) error
 }
 
+// DependencyAware is an optional component interface. Components that
+// implement it are started after all named dependencies. Components that do
+// not implement it retain the historical registration-order behaviour.
+type DependencyAware interface {
+	DependsOn() []string
+}
+
+// ReadyAware is an optional component interface. When implemented, Ready is
+// evaluated by the default /ready probe after the component has started.
+// Components should keep this check bounded and side-effect free.
+type ReadyAware interface {
+	Ready(context.Context) error
+}
+
 // AddComponent registers a background component. Components start in
 // registration order and stop in reverse order during graceful shutdown.
 func (a *App) AddComponent(component Component) error {
@@ -118,7 +132,19 @@ func (a *App) AddComponent(component Component) error {
 			return fmt.Errorf("boot: component %q already registered", component.Name())
 		}
 	}
+	if _, ok := component.(ReadyAware); ok {
+		if a.readinessChecks == nil {
+			a.readinessChecks = make(map[string]func(context.Context) error)
+		}
+		name := "component:" + strings.TrimSpace(component.Name())
+		if _, exists := a.readinessChecks[name]; exists {
+			return fmt.Errorf("boot: readiness check %q already registered", name)
+		}
+	}
 	a.components = append(a.components, component)
+	if ready, ok := component.(ReadyAware); ok {
+		a.readinessChecks["component:"+strings.TrimSpace(component.Name())] = ready.Ready
+	}
 	return nil
 }
 
@@ -265,17 +291,24 @@ func New(cfgPath string) (*App, error) {
 
 	if cfg.GRPC.Enable {
 		// gRPC server with trace propagation and metrics interceptors.
+		grpcTimeout := time.Duration(cfg.GRPC.RequestTimeout) * time.Second
+		concurrency := mid.NewGRPCConcurrencyLimiter(cfg.GRPC.MaxConcurrent)
 		grpcOptions := []grpc.ServerOption{
 			grpc.MaxRecvMsgSize(defaultInt(cfg.GRPC.MaxRecvMsgSize, 4<<20)),
 			grpc.MaxSendMsgSize(defaultInt(cfg.GRPC.MaxSendMsgSize, 4<<20)),
 			grpc.ChainUnaryInterceptor(
 				mid.GRPCUnaryServerInterceptor(),
 				mid.GRPCRecoveryUnaryInterceptor(),
+				mid.GRPCUnaryTimeout(grpcTimeout),
+				concurrency.Unary(),
+				mid.GRPCUnaryAccessLog(),
 				metrics.GRPCUnaryServerInterceptor(),
 			),
 			grpc.ChainStreamInterceptor(
 				mid.GRPCStreamServerInterceptor(),
 				mid.GRPCRecoveryStreamInterceptor(),
+				mid.GRPCStreamTimeout(grpcTimeout),
+				concurrency.Stream(),
 				metrics.GRPCStreamServerInterceptor(),
 			),
 		}
@@ -542,6 +575,11 @@ func ensureOperationalRoutesWithReady(r *gin.Engine, ready ...func() bool) {
 			c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		})
 	}
+	if !hasRoute(r, http.MethodGet, "/startup") {
+		r.GET("/startup", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"status": "started"})
+		})
+	}
 	if !hasRoute(r, http.MethodGet, "/ready") {
 		r.GET("/ready", func(c *gin.Context) {
 			if !isReady() {
@@ -639,10 +677,14 @@ func (a *App) startComponents(timeoutSeconds int) error {
 	if len(components) == 0 {
 		return nil
 	}
+	ordered, err := orderComponents(components)
+	if err != nil {
+		return err
+	}
 	startTimeout := time.Duration(defaultInt(timeoutSeconds, 10)) * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make([]Component, 0, len(components))
-	for _, component := range components {
+	for _, component := range ordered {
 		if err := runComponentStart(ctx, component, startTimeout); err != nil {
 			cancel()
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), startTimeout)

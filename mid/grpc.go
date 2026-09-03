@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 
 	"github.com/baowk/dilu-go-kit/log"
+	kitmetadata "github.com/baowk/dilu-go-kit/metadata"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -14,7 +15,7 @@ import (
 
 const (
 	grpcTraceKey   = "x-trace-id"
-	grpcRequestKey = "x-request-id"
+	grpcRequestKey = "x-request-id" // deprecated compatibility alias
 )
 
 // GRPCUnaryClientInterceptor injects trace_id from context into gRPC metadata
@@ -23,6 +24,7 @@ const (
 //	conn, _ := grpc.NewClient(addr, grpc.WithUnaryInterceptor(mid.GRPCUnaryClientInterceptor()))
 func GRPCUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		ctx = kitmetadata.InjectGRPC(ctx)
 		if traceID := validTraceID(log.GetTraceID(ctx)); traceID != "" {
 			ctx = setOutgoingTrace(ctx, traceID)
 		}
@@ -33,6 +35,7 @@ func GRPCUnaryClientInterceptor() grpc.UnaryClientInterceptor {
 // GRPCStreamClientInterceptor injects trace_id for outgoing stream calls.
 func GRPCStreamClientInterceptor() grpc.StreamClientInterceptor {
 	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		ctx = kitmetadata.InjectGRPC(ctx)
 		if traceID := validTraceID(log.GetTraceID(ctx)); traceID != "" {
 			ctx = setOutgoingTrace(ctx, traceID)
 		}
@@ -91,19 +94,25 @@ func GRPCRecoveryStreamInterceptor() grpc.StreamServerInterceptor {
 func extractTraceFromMetadata(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return log.WithTraceID(ctx, uuid.NewString())
+		traceID := uuid.NewString()
+		return log.WithTraceID(kitmetadata.With(ctx, kitmetadata.Values{TraceID: traceID}), traceID)
 	}
+	ctx = kitmetadata.ExtractGRPC(ctx, md)
+	values := kitmetadata.From(ctx)
 	vals := md.Get(grpcTraceKey)
 	if len(vals) == 0 || vals[0] == "" {
 		vals = md.Get(grpcRequestKey)
 	}
-	traceID := ""
+	traceID := values.TraceID
 	if len(vals) > 0 {
-		traceID = validTraceID(vals[0])
+		if parsed := validTraceID(vals[0]); parsed != "" {
+			traceID = parsed
+		}
 	}
 	if traceID == "" {
 		traceID = uuid.NewString()
 	}
+	ctx = kitmetadata.With(ctx, kitmetadata.Values{TraceID: traceID})
 	return log.WithTraceID(ctx, traceID)
 }
 
@@ -111,7 +120,7 @@ func setOutgoingTrace(ctx context.Context, traceID string) context.Context {
 	md, _ := metadata.FromOutgoingContext(ctx)
 	md = md.Copy()
 	md.Set(grpcTraceKey, traceID)
-	md.Set(grpcRequestKey, traceID)
+	md.Set(grpcRequestKey, traceID) // compatibility alias; same canonical trace ID
 	return metadata.NewOutgoingContext(ctx, md)
 }
 

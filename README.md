@@ -26,6 +26,8 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 - **Proto/Buf** — 契约优先生成 Go、gRPC、HTTP Gateway 和 OpenAPI
 - **cmd/dilu** — AI 友好的服务与资源脚手架
 - **grpcx.DialService** — 注册中心服务名拨号 + 健康实例 round_robin
+- **metadata** — HTTP/gRPC 共用的 trace ID 元数据传播
+- **registry.Registry** — 注册发现抽象，内置 etcd/Consul，可注册自定义后端
 
 ## 安装
 
@@ -37,6 +39,22 @@ go get github.com/baowk/dilu-go-kit@latest
 
 核心依赖版本和升级规则见 [`docs/conventions.md`](docs/conventions.md)；根目录 `go.mod`
 始终记录当前锁定版本。
+
+服务组件可通过可选的 `DependsOn() []string` 声明启动依赖；框架会拓扑排序并检测未知依赖
+和循环依赖。HTTP/gRPC 出站调用可使用 `metadata` 包传播统一的 trace ID，身份信息仍须在
+认证成功后显式写入，不能直接信任外部请求头。
+
+gRPC 服务可在配置中设置 `grpc.requestTimeout` 和 `grpc.maxConcurrent`；客户端可通过
+`grpcx.DialOption{DefaultRequestTimeout: ...}` 设置默认 RPC deadline。Kubernetes 或 DNS
+部署可直接使用 `grpcx.DialDNS(ctx, "user-service.default.svc.cluster.local:9000")`，无需注册中心。
+
+注册中心不与具体产品绑定。除内置 etcd/Consul 外，可在启动时注册自定义后端：
+
+```go
+_ = registry.RegisterBackend("nacos", func(cfg registry.Config) (registry.Registry, error) {
+    return nacosregistry.New(cfg)
+})
+```
 
 ## AI 友好的契约和脚手架
 
@@ -421,6 +439,8 @@ diagnostics:
 
 配置 `addr` 后由 `boot` 启动独立管理端口；不配置 `addr` 时才注册到业务 Gin 端口。
 生产环境建议始终使用 loopback/内网管理地址或额外认证策略保护。
+
+`/startup`、`/health`、`/ready` 分别用于启动完成、进程存活和依赖就绪探针。
 
 ## 事件通知
 

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	kitmetadata "github.com/baowk/dilu-go-kit/metadata"
 	"github.com/baowk/dilu-go-kit/resp"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -56,6 +57,7 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 				if uid > 0 {
 					c.Set("uid", uid)
 					setTrustedHeaderContext(c, cfg)
+					attachIdentityMetadata(c)
 					c.Next()
 					return
 				}
@@ -132,9 +134,46 @@ func JWT(cfg JWTConfig) gin.HandlerFunc {
 			c.Set("phone", mob)
 		}
 		setOptionalClaimContext(c, claims)
+		attachIdentityMetadata(c)
 
 		c.Next()
 	}
+}
+
+// attachIdentityMetadata mirrors verified JWT identity into the request
+// context. It never reads arbitrary request headers; trusted-header mode has
+// already completed its CIDR and validity checks before this is called.
+func attachIdentityMetadata(c *gin.Context) {
+	if c == nil || c.Request == nil {
+		return
+	}
+	values := kitmetadata.From(c.Request.Context())
+	if uid, ok := c.Get("uid"); ok {
+		if id, ok := uid.(int64); ok && id > 0 {
+			values.UserID = id
+		}
+	}
+	if tenant, ok := c.Get("tenant_id"); ok {
+		if id, ok := tenant.(int64); ok && id > 0 {
+			values.TenantID = id
+		}
+	}
+	if workspace, ok := c.Get("workspace_id"); ok {
+		if id, ok := workspace.(int64); ok && id > 0 {
+			values.WorkspaceID = id
+		}
+	}
+	if shops, ok := c.Get("shop_ids"); ok {
+		if ids, ok := shops.([]int64); ok {
+			values.ShopIDs = ids
+		}
+	}
+	if scopes, ok := c.Get("scopes"); ok {
+		if list, ok := scopes.([]string); ok {
+			values.Scopes = list
+		}
+	}
+	c.Request = c.Request.WithContext(kitmetadata.With(c.Request.Context(), values))
 }
 
 func parseTrustedCIDRs(values []string) ([]*net.IPNet, bool) {

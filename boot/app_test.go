@@ -23,6 +23,22 @@ func (c *testComponent) Name() string                { return c.name }
 func (c *testComponent) Start(context.Context) error { c.started = true; return nil }
 func (c *testComponent) Stop(context.Context) error  { c.stopped = true; return nil }
 
+type dependentComponent struct {
+	testComponent
+	deps  []string
+	order *[]string
+}
+
+type readyComponent struct{ testComponent }
+
+func (c *readyComponent) Ready(context.Context) error { return errors.New("warming up") }
+
+func (c *dependentComponent) DependsOn() []string { return c.deps }
+func (c *dependentComponent) Start(ctx context.Context) error {
+	*c.order = append(*c.order, c.name)
+	return c.testComponent.Start(ctx)
+}
+
 func TestAppComponentLifecycleAndReadiness(t *testing.T) {
 	a := &App{}
 	first, second := &testComponent{name: "first"}, &testComponent{name: "second"}
@@ -58,6 +74,48 @@ func TestAppComponentLifecycleAndReadiness(t *testing.T) {
 	}
 }
 
+func TestOrderComponentsHonorsDependencies(t *testing.T) {
+	order := []string{}
+	c := &dependentComponent{testComponent: testComponent{name: "c"}, order: &order}
+	b := &dependentComponent{testComponent: testComponent{name: "b"}, deps: []string{"c"}, order: &order}
+	a := &dependentComponent{testComponent: testComponent{name: "a"}, deps: []string{"b"}, order: &order}
+	ordered, err := orderComponents([]Component{a, b, c})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, component := range ordered {
+		if err := component.Start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := strings.Join(order, ","), "c,b,a"; got != want {
+		t.Fatalf("start order = %q, want %q", got, want)
+	}
+}
+
+func TestOrderComponentsRejectsUnknownDependencyAndCycle(t *testing.T) {
+	missing := &dependentComponent{testComponent: testComponent{name: "a"}, deps: []string{"missing"}}
+	if _, err := orderComponents([]Component{missing}); err == nil || !strings.Contains(err.Error(), "unknown component") {
+		t.Fatalf("missing dependency error = %v", err)
+	}
+	a := &dependentComponent{testComponent: testComponent{name: "a"}, deps: []string{"b"}}
+	b := &dependentComponent{testComponent: testComponent{name: "b"}, deps: []string{"a"}}
+	if _, err := orderComponents([]Component{a, b}); err == nil || !strings.Contains(err.Error(), "dependency cycle") {
+		t.Fatalf("cycle error = %v", err)
+	}
+}
+
+func TestReadyAwareComponentIsIncludedInReadiness(t *testing.T) {
+	a := &App{}
+	component := &readyComponent{testComponent{name: "consumer"}}
+	if err := a.AddComponent(component); err != nil {
+		t.Fatal(err)
+	}
+	if a.readinessOK() {
+		t.Fatal("readiness should fail while component is not ready")
+	}
+}
+
 func TestResolveAdvertiseAddrUsesExplicitValue(t *testing.T) {
 	t.Setenv("MF_ADVERTISE_IP", "10.0.1.9")
 	got := resolveAdvertiseAddr(":8080", "10.0.1.5:8080")
@@ -73,6 +131,18 @@ func TestNewHTTPServerUsesSafeDefaults(t *testing.T) {
 	}
 	if srv.MaxHeaderBytes != 1<<20 {
 		t.Fatalf("max header bytes = %d", srv.MaxHeaderBytes)
+	}
+}
+
+func TestEnsureOperationalRoutesAddsStartup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	ensureOperationalRoutesWithReady(r, func() bool { return true })
+	req := httptest.NewRequest(http.MethodGet, "/startup", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "started") {
+		t.Fatalf("startup response = %d %q", rec.Code, rec.Body.String())
 	}
 }
 

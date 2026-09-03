@@ -34,6 +34,9 @@ type DialOption struct {
 	KeepaliveTime time.Duration
 	// KeepaliveTimeout is how long to wait for a ping ack (default 10s)
 	KeepaliveTimeout time.Duration
+	// DefaultRequestTimeout applies to unary and stream calls when the caller
+	// has not already set a deadline. Zero disables this client-side default.
+	DefaultRequestTimeout time.Duration
 	// TLSConfig enables TLS transport credentials.
 	TLSConfig *tls.Config
 	// TransportCredentials overrides TLSConfig/insecure credentials.
@@ -102,6 +105,20 @@ func DialContext(ctx context.Context, addr string, opts ...DialOption) (*grpc.Cl
 	return dialContext(ctx, addr, opt)
 }
 
+// DialDNS dials a DNS target using gRPC's native resolver. The target may be
+// a complete dns:/// URI or a host/service name, which is normalized to the
+// URI form. Kubernetes Service DNS names therefore require no registry.
+func DialDNS(ctx context.Context, target string, opts ...DialOption) (*grpc.ClientConn, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, fmt.Errorf("grpcx: empty DNS target")
+	}
+	if !strings.HasPrefix(target, "dns:///") {
+		target = "dns:///" + strings.TrimPrefix(target, "//")
+	}
+	return DialContext(ctx, target, opts...)
+}
+
 func dialContext(ctx context.Context, addr string, opt DialOption) (*grpc.ClientConn, error) {
 	if strings.TrimSpace(addr) == "" {
 		return nil, fmt.Errorf("grpcx: empty address")
@@ -122,8 +139,8 @@ func dialContext(ctx context.Context, addr string, opt DialOption) (*grpc.Client
 			PermitWithoutStream: true,
 		}),
 		grpc.WithDefaultServiceConfig(serviceConfig),
-		grpc.WithChainUnaryInterceptor(mid.GRPCUnaryClientInterceptor()),
-		grpc.WithChainStreamInterceptor(mid.GRPCStreamClientInterceptor()),
+		grpc.WithChainUnaryInterceptor(mid.GRPCUnaryClientInterceptor(), mid.GRPCUnaryClientTimeout(opt.DefaultRequestTimeout)),
+		grpc.WithChainStreamInterceptor(mid.GRPCStreamClientInterceptor(), mid.GRPCStreamClientTimeout(opt.DefaultRequestTimeout)),
 	}
 	if opt.Telemetry != nil {
 		grpcOptions = append(grpcOptions, opt.Telemetry.GRPCDialOption())
@@ -237,6 +254,9 @@ func (o DialOption) retryServiceConfigValidated() (string, error) {
 func (o DialOption) validate() error {
 	if o.Timeout <= 0 || o.KeepaliveTime <= 0 || o.KeepaliveTimeout <= 0 {
 		return fmt.Errorf("grpcx: timeout and keepalive durations must be positive")
+	}
+	if o.DefaultRequestTimeout < 0 || o.DefaultRequestTimeout > 5*time.Minute {
+		return fmt.Errorf("grpcx: default request timeout must be between 0 and 5m")
 	}
 	if o.RetryMaxAttempts < 1 || o.RetryMaxAttempts > 5 {
 		return fmt.Errorf("grpcx: retry max attempts must be between 1 and 5")

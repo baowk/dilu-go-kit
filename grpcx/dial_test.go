@@ -125,3 +125,10 @@ func TestDurationString(t *testing.T) {
 		t.Fatalf("durationString = %q", got)
 	}
 }
+
+func TestDefaultRequestTimeoutValidation(t *testing.T) {
+	opt := normalizeDialOption(DialOption{DefaultRequestTimeout: -time.Second})
+	if err := opt.validate(); err == nil {
+		t.Fatal("expected negative default request timeout to be rejected")
+	}
+}

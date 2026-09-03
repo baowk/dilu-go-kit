@@ -34,6 +34,27 @@ func TestConfig_registryType(t *testing.T) {
 	}
 }
 
+func TestCustomBackendFactory(t *testing.T) {
+	if err := RegisterBackend("memory-test", func(Config) (Registry, error) {
+		return &fakeRegistry{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := New(Config{Type: "MEMORY-TEST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.(*fakeRegistry); !ok {
+		t.Fatalf("registry type = %T, want *fakeRegistry", r)
+	}
+	if err := RegisterBackend("bad/name", func(Config) (Registry, error) { return nil, nil }); err == nil {
+		t.Fatal("expected invalid backend name error")
+	}
+	if err := RegisterBackend("nil-factory", nil); err == nil {
+		t.Fatal("expected nil factory error")
+	}
+}
+
 func TestConfig_prefix(t *testing.T) {
 	c1 := Config{}
 	if c1.prefix() != "/mofang/services/" {

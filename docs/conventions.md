@@ -27,6 +27,37 @@
 - 发布版本时在 README/CHANGELOG（如存在）记录依赖基线和潜在行为变更；生产环境先在
   staging 验证，再滚动升级并观察错误率、延迟和资源使用。
 
+## 组件依赖与请求元数据
+
+依赖注入采用显式构造函数与 `boot.App.AddComponent` 注册，便于审查启动顺序和资源
+生命周期；本项目不引入 Wire 等编译期 DI 工具。
+
+后台组件继续实现 `boot.Component` 即可；需要声明启动顺序时额外实现：
+
+```go
+func (c *Consumer) DependsOn() []string { return []string{"database", "redis"} }
+```
+
+`boot` 会按依赖拓扑排序启动，并在启动前拒绝未知依赖或循环依赖；未实现
+`DependsOn` 的组件保持注册顺序，兼容已有服务。停止顺序始终与实际启动顺序相反。
+组件如需参与就绪探针，可额外实现 `Ready(context.Context) error`；返回错误时 `/ready`
+保持 503，避免依赖尚未可用时提前接收流量。
+
+跨 HTTP/gRPC 传递统一 trace ID 使用 `metadata` 包：
+
+```go
+ctx = metadata.ExtractHTTP(ctx, req.Header)
+metadata.InjectHTTP(ctx, req.Header)
+ctx = metadata.ExtractGRPC(ctx, incomingMD)
+ctx = metadata.InjectGRPC(ctx)
+```
+
+该包默认只传播 trace 标识。用户、租户和 workspace 等身份字段必须在认证成功后
+由服务显式建立，禁止把外部请求头直接当作可信身份。
+
+注册发现统一依赖 `registry.Registry` 接口；etcd 与 Consul 是可替换的后端实现，
+通过 `registry.New` 按配置选择。业务代码不应直接依赖任一厂商客户端。
+
 ## 一、项目结构
 
 ```
@@ -261,7 +292,7 @@ mid.Default(a.Gin, mid.DefaultConfig{
 // 注册顺序：Trace → Recovery → ErrorHandler → Logger → CORS → RateLimit
 
 // 方式二：单独使用
-r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id；X-Request-Id 仅作兼容别名）
+r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id；旧 X-Request-Id 仅作同值兼容别名）
 r.Use(mid.Recovery())       // panic 恢复
 r.Use(mid.ErrorHandler())   // AppError panic 捕获
 r.Use(mid.Logger())         // 请求日志（method/path/status/latency/traceId）
@@ -365,7 +396,7 @@ import "github.com/baowk/dilu-go-kit/notify"
 
 _ = notify.InitConfig(notify.Config{BaseURL: "http://mf-ws:9020", Token: token})
 notify.Send("env", map[string]any{"action": "created", "env_id": 123})
-notify.SendContext(ctx, "proxy", payload)  // 携带 traceId，兼容写入 X-Request-Id 同值别名
+notify.SendContext(ctx, "proxy", payload)  // 携带 traceId（旧 X-Request-Id 仅作同值兼容别名）
 err := notify.SendContextE(ctx, "proxy", payload) // 关键通知必须处理错误
 ```
 
@@ -447,6 +478,8 @@ redis:
 
 grpc:
   enable: false
+  requestTimeout: 3          # unary/stream 默认 deadline（秒，0 表示不设置）
+  maxConcurrent: 1000        # 最大并发 RPC 数，0 表示不限制
   addr: ":9090"              # 监听地址
   # advertiseAddr: "10.0.1.5:9090" # 注册发现地址；空时从 addr 推断
   # tls:

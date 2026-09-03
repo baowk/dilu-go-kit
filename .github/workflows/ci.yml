@@ -13,18 +13,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
       - run: go mod verify
       - run: test -z "$(gofmt -l .)"
+      - name: Validate API contracts
+        run: |
+          make proto-lint
+          make proto-generate
+          make proto-breaking
       - name: Check whitespace
         run: |
           git diff --check
           git diff --check "$(git hash-object -t tree /dev/null)" HEAD
       - run: go test ./...
       - run: go test -race ./...
+      - run: go test -count=1 -shuffle=on ./...
       - run: go vet ./...
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.2.0
       - run: govulncheck ./...

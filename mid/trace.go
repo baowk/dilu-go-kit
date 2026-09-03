@@ -2,6 +2,7 @@ package mid
 
 import (
 	"github.com/baowk/dilu-go-kit/log"
+	kitmetadata "github.com/baowk/dilu-go-kit/metadata"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
@@ -9,14 +10,19 @@ import (
 
 const (
 	TraceHeader   = "X-Trace-Id"
-	RequestHeader = "X-Request-Id"
+	RequestHeader = "X-Request-Id" // deprecated compatibility alias for TraceHeader
 )
 
 // Trace returns a Gin middleware that extracts or generates a trace ID,
 // stores it in the context, and sets the response header.
 func Trace() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		traceID := log.GetTraceID(c.Request.Context())
+		ctx := kitmetadata.ExtractHTTP(c.Request.Context(), c.Request.Header)
+		values := kitmetadata.From(ctx)
+		traceID := values.TraceID
+		if traceID == "" {
+			traceID = log.GetTraceID(ctx)
+		}
 		if traceID == "" {
 			if spanCtx := trace.SpanContextFromContext(c.Request.Context()); spanCtx.IsValid() {
 				traceID = spanCtx.TraceID().String()
@@ -37,10 +43,11 @@ func Trace() gin.HandlerFunc {
 		c.Set("trace_id", traceID)
 
 		// Store in request context (for log.InfoContext)
-		ctx := log.WithTraceID(c.Request.Context(), traceID)
+		ctx = kitmetadata.With(ctx, kitmetadata.Values{TraceID: traceID})
+		ctx = log.WithTraceID(ctx, traceID)
 		c.Request = c.Request.WithContext(ctx)
 
-		// Response headers. X-Request-Id is a compatibility alias for trace_id.
+		// Trace ID is the single request correlation identifier.
 		c.Header(TraceHeader, traceID)
 		c.Header(RequestHeader, traceID)
 

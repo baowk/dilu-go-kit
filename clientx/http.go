@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	kitmetadata "github.com/baowk/dilu-go-kit/metadata"
 	"github.com/baowk/dilu-go-kit/metrics"
 	"github.com/baowk/dilu-go-kit/telemetry"
 	"go.opentelemetry.io/otel/attribute"
@@ -175,6 +176,7 @@ func (c *HTTPClient) single(ctx context.Context, req *http.Request, body []byte,
 		maxResponseBodyBytes = 10 << 20
 	}
 	attemptReq := req.Clone(callCtx)
+	kitmetadata.InjectHTTP(callCtx, attemptReq.Header)
 	if body != nil {
 		attemptReq.Body = io.NopCloser(bytes.NewReader(body))
 		attemptReq.ContentLength = int64(len(body))

@@ -63,8 +63,8 @@ func corsAllowAll() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Trace-Id,X-Request-Id")
-		c.Header("Access-Control-Expose-Headers", "X-Trace-Id,X-Request-Id")
+		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Trace-Id")
+		c.Header("Access-Control-Expose-Headers", "X-Trace-Id")
 		c.Header("Access-Control-Max-Age", "86400")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -87,8 +87,8 @@ func corsWhitelist(allowed []string) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Trace-Id,X-Request-Id")
-		c.Header("Access-Control-Expose-Headers", "X-Trace-Id,X-Request-Id,refresh-access-token,refresh-exp")
+		c.Header("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Trace-Id")
+		c.Header("Access-Control-Expose-Headers", "X-Trace-Id,refresh-access-token,refresh-exp")
 		c.Header("Access-Control-Max-Age", "86400")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
