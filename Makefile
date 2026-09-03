@@ -2,6 +2,7 @@ SHELL := /bin/sh
 
 BUF_VERSION ?= 1.47.2
 BUF ?= $(CURDIR)/bin/buf
+PROTO_BREAKING_AGAINST ?= .git#branch=origin/main
 
 .PHONY: proto-lint proto-generate proto-breaking buf-install generate check
 
@@ -18,7 +19,7 @@ proto-generate: buf-install
 	@$(BUF) generate
 
 proto-breaking: buf-install
-	@$(BUF) breaking --against '.git#branch=main'
+	@$(BUF) breaking --against '$(PROTO_BREAKING_AGAINST)'
 
 generate: proto-generate
 
