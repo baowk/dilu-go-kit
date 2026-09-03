@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	grpcTraceKey   = "x-trace-id"
-	grpcRequestKey = "x-request-id" // deprecated compatibility alias
+	grpcTraceKey = "x-trace-id"
 )
 
 // GRPCUnaryClientInterceptor injects trace_id from context into gRPC metadata
@@ -100,9 +99,6 @@ func extractTraceFromMetadata(ctx context.Context) context.Context {
 	ctx = kitmetadata.ExtractGRPC(ctx, md)
 	values := kitmetadata.From(ctx)
 	vals := md.Get(grpcTraceKey)
-	if len(vals) == 0 || vals[0] == "" {
-		vals = md.Get(grpcRequestKey)
-	}
 	traceID := values.TraceID
 	if len(vals) > 0 {
 		if parsed := validTraceID(vals[0]); parsed != "" {
@@ -120,7 +116,6 @@ func setOutgoingTrace(ctx context.Context, traceID string) context.Context {
 	md, _ := metadata.FromOutgoingContext(ctx)
 	md = md.Copy()
 	md.Set(grpcTraceKey, traceID)
-	md.Set(grpcRequestKey, traceID) // compatibility alias; same canonical trace ID
 	return metadata.NewOutgoingContext(ctx, md)
 }
 

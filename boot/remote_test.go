@@ -1,13 +1,26 @@
 package boot
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/baowk/dilu-go-kit/registry"
 	"github.com/spf13/viper"
 )
+
+type testKVStore struct{ value []byte }
+
+func (s testKVStore) Get(context.Context, string) ([]byte, error) {
+	return append([]byte(nil), s.value...), nil
+}
+func (s testKVStore) WatchKey(ctx context.Context, _ string, onChange func([]byte)) error {
+	onChange(s.value)
+	<-ctx.Done()
+	return ctx.Err()
+}
 
 // ── key resolution ──
 
@@ -104,6 +117,21 @@ func TestRegistryType_consul(t *testing.T) {
 	r := RegistryConfig{Type: "consul"}
 	if r.registryType() != "consul" {
 		t.Errorf("consul type = %q", r.registryType())
+	}
+}
+
+func TestRemoteConfigInjectedKVStore(t *testing.T) {
+	store := testKVStore{value: []byte("server:\n  name: injected\n  addr: ':8080'\n")}
+	var cfg Config
+	reg := RegistryConfig{Type: "custom", ConfigKey: "/config/"}
+	if err := LoadRemoteConfigFromStore(store, reg, "svc", &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Name != "injected" {
+		t.Fatalf("config = %+v", cfg)
+	}
+	if _, ok := any(store).(registry.KVStore); !ok {
+		t.Fatal("test store should satisfy registry.KVStore")
 	}
 }
 
@@ -272,67 +300,6 @@ func TestMergeConfigLayersLocalOnlyFallback(t *testing.T) {
 	}
 	if base.Server.Name != "local" || base.Redis.Addr != "local-redis:6379" {
 		t.Fatalf("base changed unexpectedly: %+v", base)
-	}
-}
-
-// ── fetchRemoteByKey error paths ──
-
-func TestFetchRemoteByKey_unsupportedType(t *testing.T) {
-	reg := RegistryConfig{Type: "zookeeper"}
-	_, err := fetchRemoteByKey(reg, "/any")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "unsupported type") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestFetchRemoteByKey_etcdNoEndpoints(t *testing.T) {
-	reg := RegistryConfig{Type: "etcd"}
-	_, err := fetchRemoteByKey(reg, "/any")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "no etcd endpoints") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-func TestFetchRemoteByKey_consulNoAddress(t *testing.T) {
-	reg := RegistryConfig{Type: "consul"}
-	_, err := fetchRemoteByKey(reg, "/any")
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "no consul address") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-// ── WatchRemoteConfig error path ──
-
-func TestWatchRemoteConfig_unsupportedType(t *testing.T) {
-	reg := RegistryConfig{Type: "zookeeper", ConfigKey: "/config/"}
-	err := WatchRemoteConfig(nil, reg, "svc", nil)
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "unsupported type") {
-		t.Errorf("unexpected error: %v", err)
-	}
-}
-
-// ── consul client fallback to Endpoints[0] ──
-
-func TestRemoteConsulClient_fallbackToEndpoints(t *testing.T) {
-	reg := RegistryConfig{Type: "consul", Endpoints: []string{"127.0.0.1:8500"}}
-	cli, err := remoteConsulClient(reg)
-	if err != nil {
-		t.Fatalf("consul client: %v", err)
-	}
-	if cli == nil {
-		t.Fatal("expected non-nil client")
 	}
 }
 

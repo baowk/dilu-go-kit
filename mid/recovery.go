@@ -1,5 +1,7 @@
-// Package mid provides common Gin middleware: panic recovery, CORS,
-// JWT authentication, rate limiting, traceId, and gRPC interceptors.
+// Package mid provides core Gin/gRPC middleware: panic recovery, CORS,
+// rate limiting, traceId propagation, and transport policy interceptors.
+// Optional third-party integrations such as JWT authentication live under
+// contrib/mid and are imported explicitly by services that need them.
 package mid
 
 import (

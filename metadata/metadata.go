@@ -89,7 +89,7 @@ func InjectIdentityHTTP(ctx context.Context, header http.Header) {
 func ExtractHTTP(ctx context.Context, header http.Header) context.Context {
 	values := From(ctx)
 	if header != nil {
-		values.TraceID = first(header.Get("X-Trace-Id"), header.Get("X-Request-Id")) // legacy alias
+		values.TraceID = normalize(header.Get("X-Trace-Id"))
 	}
 	return With(ctx, values)
 }
@@ -139,18 +139,9 @@ func InjectIdentityGRPC(ctx context.Context) context.Context {
 func ExtractGRPC(ctx context.Context, md grpcmetadata.MD) context.Context {
 	values := From(ctx)
 	if md != nil {
-		values.TraceID = firstValue(md.Get("x-trace-id"), md.Get("x-request-id")) // legacy alias
+		values.TraceID = firstValue(md.Get("x-trace-id"))
 	}
 	return With(ctx, values)
-}
-
-func first(values ...string) string {
-	for _, value := range values {
-		if value = normalize(value); value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func firstValue(values ...[]string) string {

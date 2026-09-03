@@ -98,7 +98,8 @@ type NotifyConfig struct {
 	MaxPayloadBytes int    `mapstructure:"maxPayloadBytes"` // default 1 MiB, maximum 16 MiB
 }
 
-// RegistryConfig describes the service registry (etcd or consul).
+// RegistryConfig describes the service registry. Concrete backends are
+// provided by optional contrib modules and registered before boot.New.
 // It also drives optional remote config loading from the same backend.
 type RegistryConfig struct {
 	Enable                  bool               `mapstructure:"enable"`

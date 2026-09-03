@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"strconv"
 
+	jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service/dto"
 	"github.com/baowk/dilu-go-kit/log"
-	"github.com/baowk/dilu-go-kit/mid"
 	"github.com/baowk/dilu-go-kit/resp"
 	base "github.com/baowk/dilu-go-kit/store"
 	"github.com/gin-gonic/gin"
@@ -110,7 +110,7 @@ func (a *TaskAPI) Delete(c *gin.Context) {
 }
 
 func requireWorkspace(c *gin.Context) (int64, bool) {
-	workspaceID := mid.GetWorkspaceID(c)
+	workspaceID := jwtmid.GetWorkspaceID(c)
 	if workspaceID <= 0 {
 		resp.FailStatus(c, http.StatusForbidden, resp.CodeForbidden, "缺少工作区权限")
 		return 0, false

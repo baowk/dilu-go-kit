@@ -9,8 +9,7 @@ import (
 )
 
 const (
-	TraceHeader   = "X-Trace-Id"
-	RequestHeader = "X-Request-Id" // deprecated compatibility alias for TraceHeader
+	TraceHeader = "X-Trace-Id"
 )
 
 // Trace returns a Gin middleware that extracts or generates a trace ID,
@@ -31,9 +30,6 @@ func Trace() gin.HandlerFunc {
 		if traceID == "" {
 			traceID = c.GetHeader(TraceHeader)
 		}
-		if traceID == "" {
-			traceID = c.GetHeader(RequestHeader)
-		}
 		traceID = validTraceID(traceID)
 		if traceID == "" {
 			traceID = uuid.NewString()
@@ -49,7 +45,6 @@ func Trace() gin.HandlerFunc {
 
 		// Trace ID is the single request correlation identifier.
 		c.Header(TraceHeader, traceID)
-		c.Header(RequestHeader, traceID)
 
 		c.Next()
 	}

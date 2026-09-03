@@ -1,4 +1,4 @@
-package telemetry
+package gorm
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/metrics"
+	core "github.com/baowk/dilu-go-kit/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -16,12 +17,12 @@ import (
 // GORMPlugin adds lightweight spans around GORM CRUD operations. It records
 // operation and table metadata but not SQL text, which may contain secrets.
 type GORMPlugin struct {
-	Provider       *Provider
+	Provider       *core.Provider
 	lastPoolSample atomic.Int64
 }
 
 // NewGORMPlugin creates a GORM tracing plugin.
-func NewGORMPlugin(provider *Provider) *GORMPlugin { return &GORMPlugin{Provider: provider} }
+func NewGORMPlugin(provider *core.Provider) *GORMPlugin { return &GORMPlugin{Provider: provider} }
 
 func (p *GORMPlugin) Name() string { return "dilu:otel" }
 

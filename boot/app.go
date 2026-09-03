@@ -262,16 +262,11 @@ func New(cfgPath string) (*App, error) {
 				return sqlDB.PingContext(ctx)
 			})
 		}
-		if tp.Enabled() {
-			for name, db := range app.DBs {
-				db = db.Set("dilu:db_name", name)
-				app.DBs[name] = db
-				if err := db.Use(telemetry.NewGORMPlugin(tp)); err != nil {
-					closeDBs(app.DBs)
-					_ = tp.Shutdown(context.Background())
-					return nil, fmt.Errorf("db telemetry: %w", err)
-				}
-			}
+		// Database tracing is provided by the optional contrib/telemetry/gorm
+		// adapter. Core boot intentionally does not bind GORM instrumentation.
+		for name, db := range app.DBs {
+			db = db.Set("dilu:db_name", name)
+			app.DBs[name] = db
 		}
 	}
 
@@ -284,9 +279,8 @@ func New(cfgPath string) (*App, error) {
 		}
 		app.Redis = rdb
 		_ = app.AddReadinessCheck("redis", func(ctx context.Context) error { return rdb.Ping(ctx).Err() })
-		if tp.Enabled() {
-			rdb.AddHook(telemetry.NewRedisHook(tp))
-		}
+		// Redis tracing is provided by the optional contrib/telemetry/redis
+		// adapter. Core boot intentionally does not bind go-redis hooks.
 	}
 
 	if cfg.GRPC.Enable {

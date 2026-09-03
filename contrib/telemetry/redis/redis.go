@@ -1,9 +1,10 @@
-package telemetry
+package redis
 
 import (
 	"context"
 	"strings"
 
+	core "github.com/baowk/dilu-go-kit/telemetry"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -13,12 +14,12 @@ import (
 // RedisHook instruments go-redis commands with client spans. Arguments are
 // intentionally not recorded to avoid leaking tokens or user data.
 type RedisHook struct {
-	Provider   *Provider
+	Provider   *core.Provider
 	TracerName string
 }
 
 // NewRedisHook creates a Redis tracing hook.
-func NewRedisHook(provider *Provider) *RedisHook {
+func NewRedisHook(provider *core.Provider) *RedisHook {
 	return &RedisHook{Provider: provider, TracerName: "github.com/baowk/dilu-go-kit/telemetry/redis"}
 }
 

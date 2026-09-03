@@ -5,9 +5,11 @@
 - `boot/` — 服务启动（Config/Logger/DB/Redis/gRPC/Registry/RemoteConfig）
 - `log/` — 统一日志接口（slog + traceId + lumberjack file rotation）
 - `resp/` — 统一 HTTP 响应（Ok/Fail/Page/Error/FailStatus）
-- `mid/` — 中间件（JWT/CORS/Recovery/RateLimit）
+- `mid/` — 核心中间件（CORS/Recovery/RateLimit/Trace/gRPC）；JWT 位于 `contrib/mid/jwt`
 - `store/` — 数据访问基础类型（ListOpts）
-- `registry/` — 服务注册与发现（etcd / consul）
+- `registry/` — 厂商无关的服务注册与发现抽象（具体后端位于 `contrib/registry/*`）
+- `contrib/` — 可选第三方扩展模块（注册中心、JWT、GORM/Redis OTel adapter 等），各扩展可独立维护 `go.mod`
+- `example/` — 独立 Go module，包含完整 service 与 HTTP-only gateway 示例
 - `grpcx/` — gRPC client helper（traceId + keepalive + TLS/custom credentials）
 - `example/` — 完整示例服务
 - `docs/` — 开发规范 + 快速开始
@@ -18,6 +20,7 @@
 - 快速上手见 `docs/quickstart.md`
 - 示例服务使用 `example/internal/{module}/...`，不要再使用 `internal/modules/{module}`。
 - 依赖注入保持显式构造函数和 `boot.App` 组件注册；不引入 Wire 等编译期 DI 工具。
+- 注册发现依赖 `registry.Registry` 或其细分接口；业务代码不得直接调用 etcd/Consul 客户端。
 
 ## 依赖版本基线与升级
 
@@ -25,17 +28,15 @@
 
 | 组件 | 版本 |
 | --- | --- |
-| etcd API/client/client/pkg | `v3.7.1` |
-| Consul API | `v1.34.4` |
 | Redis client | `v9.22.0` |
 | Prometheus client | `v1.24.1` |
-| OpenTelemetry（核心、SDK、trace、OTLP HTTP） | `v1.46.0` |
+| OpenTelemetry（核心、SDK、trace） | `v1.46.0` |
 | gRPC | `v1.83.2` |
 | GORM | `v1.31.2`（PostgreSQL 驱动 `v1.6.2`） |
 
 升级依赖时：
 
-- etcd 的 `api/v3`、`client/v3`、`client/pkg/v3` 必须保持同一版本；OTel 核心、SDK、
+- contrib 中的 etcd `api/v3`、`client/v3`、`client/pkg/v3` 必须保持同一版本；OTel 核心、SDK、
   trace、metric 和 exporter 必须保持同一稳定版本。
 - 必须运行 `go mod tidy` 并检查间接依赖、API/行为兼容性和安全公告，不要只手工修改版本号。
 - 除常规测试外，提交前执行 `go test ./...`、`go test -race ./...`、`go vet ./...`、

@@ -6,10 +6,16 @@
 go get github.com/baowk/dilu-go-kit@latest
 ```
 
-当前版本要求 Go 1.27.0 或更高版本。核心依赖版本基线为：etcd `v3.7.1`、Consul API
-`v1.34.4`、go-redis `v9.22.0`、Prometheus client `v1.24.1`、OpenTelemetry
-`v1.46.0`、gRPC `v1.83.2`、GORM `v1.31.2`（PostgreSQL 驱动 `v1.6.2`）。这些版本
-已在仓库的 `go.mod` 中锁定；升级时应保持 etcd/OTel 相关模块的版本对齐并完成完整验证。
+当前版本要求 Go 1.27.0 或更高版本。核心依赖版本基线为：go-redis `v9.22.0`、Prometheus
+client `v1.24.1`、OpenTelemetry `v1.46.0`、gRPC `v1.83.2`、GORM `v1.31.2`
+（PostgreSQL 驱动 `v1.6.2`）。etcd/Consul 属于独立 `contrib` module，各自声明 SDK 版本；
+升级时应保持 etcd/OTel 相关模块的版本对齐并完成完整验证。
+
+可选的注册中心和 OTel 适配器位于 `contrib` 独立 Go module；只有启用对应能力时才需要
+引入并显式注册，例如 `contrib/registry/etcd`、`contrib/telemetry/otlphttp`。
+启用 `telemetry.enabled` 并配置 exporter endpoint 时，必须先调用
+`otlphttp.Register()`；GORM/Redis 埋点则分别通过 `gormotel.NewGORMPlugin` 和
+`redisotel.NewRedisHook` 手动挂载。
 
 ## 使用脚手架创建服务
 
@@ -66,6 +72,7 @@ import (
     "log"
     "github.com/baowk/dilu-go-kit/boot"
     "github.com/baowk/dilu-go-kit/mid"
+    jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
     "my-service/internal/xxx/router"
     "my-service/internal/xxx/store"
 )
@@ -83,8 +90,7 @@ func main() {
                 Enable: true,
                 Total: 300,
                 Duration: 5,
-                Backend: "redis",
-                Redis: a.Redis,
+                Backend: "memory",
                 KeyPrefix: "my-service:ratelimit",
             },
         })
@@ -97,7 +103,7 @@ func main() {
             if err != nil { return err }
             return sqlDB.PingContext(ctx)
         })
-        router.Init(a.Gin, mid.JWTConfig{
+        router.Init(a.Gin, jwtmid.JWTConfig{
             Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer,
             Audience: cfg.JWT.Audience,
         })
@@ -199,9 +205,9 @@ TLS 配置；否则 `boot.New` 会在启动阶段拒绝明文传输。`security.
 ### 3.1 数据库迁移
 
 ```bash
-go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations create -name init
+go run github.com/baowk/dilu-go-kit/contrib/migrate/postgres/cmd/migrate -dir migrations create -name init
 DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/my_service?sslmode=disable' \
-  go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations up
+  go run github.com/baowk/dilu-go-kit/contrib/migrate/postgres/cmd/migrate -dir migrations up
 ```
 
 `create` 生成严格递增的 UnixNano 数字版本。已有迁移历史不要切换到位数更短、数值更小
@@ -327,7 +333,7 @@ type TaskAPI struct{}
 func (a *TaskAPI) List(c *gin.Context) {
     page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
     size, _ := strconv.Atoi(c.DefaultQuery("size", "20"))
-    workspaceID := mid.GetWorkspaceID(c)
+    workspaceID := jwtmid.GetWorkspaceID(c)
     if workspaceID <= 0 {
         resp.FailStatus(c, http.StatusForbidden, resp.CodeForbidden, "缺少工作区权限")
         return
@@ -350,15 +356,16 @@ package router
 import (
     "github.com/gin-gonic/gin"
     "github.com/baowk/dilu-go-kit/mid"
+    jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
     "my-service/internal/xxx/apis"
 )
 
-func Init(r *gin.Engine, jwtConfig mid.JWTConfig) {
+func Init(r *gin.Engine, jwtConfig jwtmid.JWTConfig) {
     api := &apis.TaskAPI{}
     // JWT secret 从 boot.Config 读取，在 main.go 传入或从配置获取
     // JWT 必须包含 exp 和 workspace_id（或 wid）claim
-    auth := r.Group("/v1/tasks").Use(mid.JWT(jwtConfig))
-    // Handler 中可通过 mid.GetUID/GetTenantID/GetShopIDs/GetScopes 获取身份上下文
+    auth := r.Group("/v1/tasks").Use(jwtmid.JWT(jwtConfig))
+    // Handler 中可通过 jwtmid.GetUID/GetTenantID/GetShopIDs/GetScopes 获取身份上下文
     {
         auth.GET("", api.List)
     }

@@ -31,8 +31,18 @@ jobs:
           git diff --check
           git diff --check "$(git hash-object -t tree /dev/null)" HEAD
       - run: go test ./...
+      - name: Test contrib modules
+        run: |
+          for module in example contrib/registry/etcd contrib/registry/consul contrib/telemetry/gorm contrib/telemetry/redis contrib/telemetry/otlphttp contrib/migrate/postgres contrib/stream/redis contrib/mid/ratelimit/redis contrib/mid/jwt; do
+            (cd "$module" && go mod verify && go test ./... && go test -race ./... && go vet ./...)
+          done
       - run: go test -race ./...
       - run: go test -count=1 -shuffle=on ./...
       - run: go vet ./...
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.2.0
       - run: govulncheck ./...
+      - name: Scan contrib modules
+        run: |
+          for module in example contrib/registry/etcd contrib/registry/consul contrib/telemetry/gorm contrib/telemetry/redis contrib/telemetry/otlphttp contrib/migrate/postgres contrib/stream/redis contrib/mid/ratelimit/redis contrib/mid/jwt; do
+            (cd "$module" && govulncheck ./...)
+          done

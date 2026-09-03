@@ -6,19 +6,17 @@
 
 | 组件 | 版本 |
 | --- | --- |
-| etcd API/client/client/pkg | `v3.7.1` |
-| Consul API | `v1.34.4` |
 | go-redis | `v9.22.0` |
 | Prometheus client | `v1.24.1` |
-| OpenTelemetry（核心、SDK、trace、OTLP HTTP） | `v1.46.0` |
+| OpenTelemetry（核心、SDK、trace） | `v1.46.0` |
 | gRPC | `v1.83.2` |
 | GORM | `v1.31.2` |
 | GORM PostgreSQL 驱动 | `v1.6.2` |
 
 升级约束：
 
-- etcd 的 `api/v3`、`client/v3`、`client/pkg/v3` 必须同步升级到同一版本。
-- OpenTelemetry 核心、`sdk`、`trace`、`metric` 及 OTLP exporter 必须保持同一稳定版本。
+- `contrib` 中 etcd 的 `api/v3`、`client/v3`、`client/pkg/v3` 必须同步升级到同一版本。
+- OpenTelemetry 核心、`sdk`、`trace`、`metric` 及各 contrib exporter 必须保持同一稳定版本。
 - 依赖升级后必须检查间接依赖变化、编译/API 兼容性和安全公告；不得只修改单个 `go.mod`
   条目而跳过 `go mod tidy`。
 - 提交前至少执行 `go test ./...`、`go test -race ./...`、`go vet ./...`、
@@ -55,8 +53,16 @@ ctx = metadata.InjectGRPC(ctx)
 该包默认只传播 trace 标识。用户、租户和 workspace 等身份字段必须在认证成功后
 由服务显式建立，禁止把外部请求头直接当作可信身份。
 
-注册发现统一依赖 `registry.Registry` 接口；etcd 与 Consul 是可替换的后端实现，
-通过 `registry.New` 按配置选择。业务代码不应直接依赖任一厂商客户端。
+注册发现统一依赖 `registry.Registry` 接口；其能力进一步拆分为 `Registrar`、
+`Discoverer`、`Watcher`。etcd 与 Consul 是可替换的后端实现，可通过
+`contrib/registry/etcd`、`contrib/registry/consul` 显式构造，也可用 `registry.RegisterBackend` 注册到工厂。
+需要显式控制后端时调用 adapter 的 `Register()`，而不是在业务代码中创建厂商客户端。
+仅做客户端发现时可以只实现 `registry.Discovery`（`Discoverer` + `Watcher`），无需实现注册
+和注销。业务代码不应直接依赖任一厂商客户端。
+
+远程配置使用可选的 `registry.KVStore`（`Get` + `WatchKey`）。自定义后端优先通过
+`boot.LoadRemoteConfigFromStore` / `boot.WatchRemoteConfigFromStore` 注入，避免在业务层
+直接创建 etcd 或 Consul 客户端；多层配置合并可使用 `boot.MergeRemoteConfigFromStore`。
 
 ## 一、项目结构
 
@@ -109,9 +115,9 @@ migrations/
 命令：
 
 ```bash
-go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations create -name init
+go run github.com/baowk/dilu-go-kit/contrib/migrate/postgres/cmd/migrate -dir migrations create -name init
 DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
-  go run github.com/baowk/dilu-go-kit/cmd/migrate -dir migrations up
+  go run github.com/baowk/dilu-go-kit/contrib/migrate/postgres/cmd/migrate -dir migrations up
 ```
 
 版本前缀是严格递增的十进制整数。`migrate create` 使用 UTC UnixNano，并保证同一进程内
@@ -281,6 +287,7 @@ size — 每页条数，默认 20，最大 500
 ```go
 import (
     "github.com/baowk/dilu-go-kit/mid"
+    jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
     "github.com/baowk/dilu-go-kit/log"
 )
 
@@ -292,7 +299,7 @@ mid.Default(a.Gin, mid.DefaultConfig{
 // 注册顺序：Trace → Recovery → ErrorHandler → Logger → CORS → RateLimit
 
 // 方式二：单独使用
-r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id；旧 X-Request-Id 仅作同值兼容别名）
+r.Use(mid.Trace())          // traceId 生成/传递（X-Trace-Id）
 r.Use(mid.Recovery())       // panic 恢复
 r.Use(mid.ErrorHandler())   // AppError panic 捕获
 r.Use(mid.Logger())         // 请求日志（method/path/status/latency/traceId）
@@ -302,16 +309,18 @@ r.Use(mid.RateLimitFromConfig(mid.AccessLimitCfg{
     Enable: true,
     Total: 300,
     Duration: 5,
-    Backend: "redis",              // memory（默认）或 redis
-    Redis: app.Redis,              // nil 时自动回退 memory
+    Backend: "memory",             // 核心模块仅提供 memory
     KeyPrefix: "gateway:ratelimit",
 }))
+
+Redis 分布式限流请引入 `contrib/mid/ratelimit/redis`，并显式使用
+`redisrate.RedisRateLimit` 挂载到 Gin；核心 `mid` 不依赖 go-redis。
 limiter := mid.NewRateLimiter(100, time.Minute) // 需要显式生命周期时
 r.Use(limiter.Middleware())
 // app.OnClose(limiter.Close)
 
-// JWT 认证
-auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
+// JWT 认证（需引入 contrib/mid/jwt，并命名为 jwtmid）
+auth := r.Group("/v1/xxx").Use(jwtmid.JWT(jwtmid.JWTConfig{
     Secret: jwtSecret,
     Issuer: "auth-service",
     Audience: []string{"my-service"},
@@ -319,7 +328,7 @@ auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
 // token 必须包含 exp；uid/workspace_id 可安全使用 int64
 
 // 仅在可信网关已剥离外部身份头时开启 HeaderUID 信任模式
-r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
+r.Group("/internal").Use(jwtmid.JWT(jwtmid.JWTConfig{
     HeaderUID:      "x-user-id",
     HeaderTenantID: "x-tenant-id",
     HeaderWorkspaceID: "x-workspace-id",
@@ -329,14 +338,14 @@ r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
 }))
 
 // 获取用户信息
-uid := mid.GetUID(c)            // int64
-tenantID := mid.GetTenantID(c)  // int64
-workspaceID := mid.GetWorkspaceID(c) // int64
-shopIDs := mid.GetShopIDs(c)    // []int64
-scopes := mid.GetScopes(c)      // []string
-nickname := mid.GetNickname(c)  // string
-roleID := mid.GetRoleID(c)     // int
-phone := mid.GetPhone(c)       // string
+uid := jwtmid.GetUID(c)            // int64
+tenantID := jwtmid.GetTenantID(c)  // int64
+workspaceID := jwtmid.GetWorkspaceID(c) // int64
+shopIDs := jwtmid.GetShopIDs(c)    // []int64
+scopes := jwtmid.GetScopes(c)      // []string
+nickname := jwtmid.GetNickname(c)  // string
+roleID := jwtmid.GetRoleID(c)     // int
+phone := jwtmid.GetPhone(c)       // string
 
 // gRPC traceId 透传
 conn, _ := grpcx.Dial(addr, grpcx.DialOption{
@@ -396,14 +405,14 @@ import "github.com/baowk/dilu-go-kit/notify"
 
 _ = notify.InitConfig(notify.Config{BaseURL: "http://mf-ws:9020", Token: token})
 notify.Send("env", map[string]any{"action": "created", "env_id": 123})
-notify.SendContext(ctx, "proxy", payload)  // 携带 traceId（旧 X-Request-Id 仅作同值兼容别名）
+notify.SendContext(ctx, "proxy", payload)  // 携带 traceId（X-Trace-Id）
 err := notify.SendContextE(ctx, "proxy", payload) // 关键通知必须处理错误
 ```
 
 ### Redis Stream
 
 ```go
-import "github.com/baowk/dilu-go-kit/stream"
+import "github.com/baowk/dilu-go-kit/contrib/stream/redis"
 
 _, err := stream.Publish(ctx, app.Redis, "sync.tasks", map[string]any{
     "task_id": "123",
@@ -584,7 +593,7 @@ lease: 30s TTL + keepalive
 
 `boot` 中的 Consul 注册默认使用 HTTP readiness check，检查
 `http://{addr}/ready`；`/health` 表示进程存活，`/ready` 表示实例可接收流量。
-独立使用 `registry.NewConsul` 时 `checkType` 默认为 `ttl`，避免破坏没有 HTTP
+独立使用 `contrib/registry/consul.New` 时 `checkType` 默认为 `ttl`，避免破坏没有 HTTP
 就绪端点的已有服务。`DeregisterCriticalServiceAfter` 默认 300 秒，生产建议
 保持 300-600 秒，避免短暂抖动直接删除实例。
 
@@ -602,7 +611,7 @@ last known good upstreams，并将快照标记为 `stale=true` 后告警。默�
 
 ## 七、远程配置
 
-复用 registry 的 etcd/consul 连接，从 KV 加载配置并实时热更新。
+复用已注册 registry 的 KV 能力，从后端加载配置并实时热更新；核心包不绑定具体厂商。
 
 ### 启用
 

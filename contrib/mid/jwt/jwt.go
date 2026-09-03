@@ -1,4 +1,4 @@
-package mid
+package jwtmid
 
 import (
 	"encoding/json"

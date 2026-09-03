@@ -21,7 +21,7 @@ const (
 
 // ResolverConfig configures a client-side service resolver.
 type ResolverConfig struct {
-	Registry Registry
+	Registry Discovery
 	Service  string
 	Policy   BalancePolicy
 	// Version optionally restricts resolution to a service release.

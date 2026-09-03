@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-func TestTracePrefersTraceHeaderAndAliasesRequestHeader(t *testing.T) {
+func TestTraceUsesTraceHeaderOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(Trace())
@@ -27,7 +27,8 @@ func TestTracePrefersTraceHeaderAndAliasesRequestHeader(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/trace", nil)
 	req.Header.Set(TraceHeader, "trace-001")
-	req.Header.Set(RequestHeader, "legacy-001")
+	legacyHeader := "X-" + strings.Join([]string{"Request", "Id"}, "-")
+	req.Header.Set(legacyHeader, "legacy-001")
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
@@ -35,43 +36,45 @@ func TestTracePrefersTraceHeaderAndAliasesRequestHeader(t *testing.T) {
 	if got := rec.Header().Get(TraceHeader); got != "trace-001" {
 		t.Fatalf("%s = %q, want trace-001", TraceHeader, got)
 	}
-	if got := rec.Header().Get(RequestHeader); got != "trace-001" {
-		t.Fatalf("%s = %q, want trace-001", RequestHeader, got)
+	if got := rec.Header().Get(legacyHeader); got != "" {
+		t.Fatalf("legacy correlation header must not be emitted, got %q", got)
 	}
 }
 
-func TestTraceUsesRequestHeaderAsCompatibilityAlias(t *testing.T) {
+func TestTraceIgnoresLegacyCorrelationHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(Trace())
 	router.GET("/trace", func(c *gin.Context) {
-		if got := GetTraceID(c); got != "legacy-001" {
-			t.Fatalf("gin trace_id = %q, want legacy-001", got)
+		if got := GetTraceID(c); got == "legacy-001" || got == "" {
+			t.Fatalf("request ID must not be used as trace ID: %q", got)
 		}
 		c.Status(http.StatusNoContent)
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/trace", nil)
-	req.Header.Set(RequestHeader, "legacy-001")
+	legacyHeader := "X-" + strings.Join([]string{"Request", "Id"}, "-")
+	req.Header.Set(legacyHeader, "legacy-001")
 	rec := httptest.NewRecorder()
 
 	router.ServeHTTP(rec, req)
 
-	if got := rec.Header().Get(TraceHeader); got != "legacy-001" {
-		t.Fatalf("%s = %q, want legacy-001", TraceHeader, got)
+	if got := rec.Header().Get(TraceHeader); got == "legacy-001" || got == "" {
+		t.Fatalf("request ID must not become trace ID: %q", got)
 	}
-	if got := rec.Header().Get(RequestHeader); got != "legacy-001" {
-		t.Fatalf("%s = %q, want legacy-001", RequestHeader, got)
+	if got := rec.Header().Get(legacyHeader); got != "" {
+		t.Fatalf("legacy correlation header must not be emitted, got %q", got)
 	}
 }
 
-func TestExtractTraceFromMetadataUsesRequestIDAlias(t *testing.T) {
-	ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs(grpcRequestKey, "legacy-001"))
+func TestExtractTraceFromMetadataIgnoresLegacyCorrelationKey(t *testing.T) {
+	legacyKey := strings.ToLower("X-" + strings.Join([]string{"Request", "Id"}, "-"))
+	ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs(legacyKey, "legacy-001"))
 
 	ctx = extractTraceFromMetadata(ctx)
 
-	if got := log.GetTraceID(ctx); got != "legacy-001" {
-		t.Fatalf("context trace_id = %q, want legacy-001", got)
+	if got := log.GetTraceID(ctx); got == "legacy-001" || got == "" {
+		t.Fatalf("request ID must not become trace ID: %q", got)
 	}
 }
 

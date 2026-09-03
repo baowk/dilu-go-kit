@@ -60,19 +60,20 @@ AI 写代码时必须按表/资源拆文件，避免生成巨大的 `model.go` /
 ```go
 import (
     "github.com/baowk/dilu-go-kit/mid"
+    jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
     "github.com/baowk/dilu-go-kit/resp"
     "github.com/baowk/dilu-go-kit/log"
     "github.com/baowk/dilu-go-kit/notify"
 )
 
 mid.Default(a.Gin, mid.DefaultConfig{...})  // 一行注册全部中间件
-auth := r.Group("/v1/xxx").Use(mid.JWT(mid.JWTConfig{
+auth := r.Group("/v1/xxx").Use(jwtmid.JWT(jwtmid.JWTConfig{
     Secret: jwtSecret,
     Issuer: "auth-service",
     Audience: []string{"my-service"},
 })) // token 必须包含 exp 和 workspace_id/wid
-uid := mid.GetUID(c)
-workspaceID := mid.GetWorkspaceID(c)
+uid := jwtmid.GetUID(c)
+workspaceID := jwtmid.GetWorkspaceID(c)
 resp.Ok(c, data)
 resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 log.InfoContext(ctx, "msg", "key", val)  // 自动带 trace_id
@@ -112,7 +113,7 @@ app.Run(func(a *boot.App) error {
         },
     })
     _ = notify.InitConfig(notify.Config{BaseURL: cfg.Notify.WsURL, Token: cfg.Notify.Token})
-    router.Init(a.Gin, mid.JWTConfig{
+    router.Init(a.Gin, jwtmid.JWTConfig{
         Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer, Audience: cfg.JWT.Audience,
     })
     return nil

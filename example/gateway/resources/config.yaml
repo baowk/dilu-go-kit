@@ -1,0 +1,18 @@
+server:
+  name: dilu-gateway-example
+  addr: ":8080"
+  mode: debug
+  maxBodyBytes: 10485760
+
+security:
+  requireTLS: false
+
+database: {}
+redis:
+  addr: ""
+grpc:
+  enable: false
+registry:
+  enable: false
+telemetry:
+  enabled: false

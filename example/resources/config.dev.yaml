@@ -57,7 +57,7 @@ diagnostics:
     # allowedCidrs: "127.0.0.1/32"
 
 cors:
-  enable: true
+  enable: false
   mode: allow-all                 # use whitelist in production
 
 accessLimit:

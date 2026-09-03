@@ -1,5 +1,5 @@
 // Package migratex wraps golang-migrate with project conventions.
-package migratex
+package postgres
 
 import (
 	"errors"

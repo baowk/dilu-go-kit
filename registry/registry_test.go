@@ -7,10 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	consul "github.com/hashicorp/consul/api"
-	"go.etcd.io/etcd/api/v3/mvccpb"
-	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 // --------------- Config defaults ---------------
@@ -55,6 +51,14 @@ func TestCustomBackendFactory(t *testing.T) {
 	}
 }
 
+func TestRegistryCapabilityInterfaces(t *testing.T) {
+	var r fakeRegistry
+	var _ Registrar = &r
+	var _ Discoverer = &r
+	var _ Watcher = &r
+	var _ Registry = &r
+}
+
 func TestConfig_prefix(t *testing.T) {
 	c1 := Config{}
 	if c1.prefix() != "/mofang/services/" {
@@ -67,42 +71,6 @@ func TestConfig_prefix(t *testing.T) {
 	c3 := Config{Prefix: "/custom"}
 	if c3.prefix() != "/custom/" {
 		t.Errorf("normalized prefix = %q", c3.prefix())
-	}
-}
-
-func TestConsulConfigAppliesExplicitToken(t *testing.T) {
-	cfg := consulConfig("127.0.0.1:8500", "explicit-token")
-	if cfg.Address != "127.0.0.1:8500" || cfg.Token != "explicit-token" {
-		t.Fatalf("consul config = address %q token %q", cfg.Address, cfg.Token)
-	}
-	if cfg.HttpClient == nil {
-		t.Fatal("consul HTTP client is nil")
-	}
-	if cfg.HttpClient.Timeout < 60*time.Second {
-		t.Fatalf("consul HTTP timeout = %v, want at least 60s for blocking queries", cfg.HttpClient.Timeout)
-	}
-}
-
-func TestConsulConfigEnablesTLS(t *testing.T) {
-	cfg := consulConfig("127.0.0.1:8500", "", TLSConfig{Enable: true, ServerName: "consul.internal"})
-	if cfg.Scheme != "https" || cfg.TLSConfig.Address != "consul.internal" {
-		t.Fatalf("TLS config = scheme=%q address=%q", cfg.Scheme, cfg.TLSConfig.Address)
-	}
-}
-
-func TestConsulProbeConfigSetsTimeoutBeforeClientCreation(t *testing.T) {
-	cfg, err := consulProbeConfig("127.0.0.1:8500", "", 2*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.HttpClient == nil || cfg.HttpClient.Timeout != 2*time.Second {
-		t.Fatalf("probe HTTP client = %#v", cfg.HttpClient)
-	}
-	if _, err := consul.NewClient(cfg); err != nil {
-		t.Fatal(err)
-	}
-	if cfg.HttpClient.Timeout != 2*time.Second {
-		t.Fatalf("NewClient replaced probe timeout: %s", cfg.HttpClient.Timeout)
 	}
 }
 
@@ -155,35 +123,6 @@ func TestConfig_deregisterCriticalAfterDefault(t *testing.T) {
 	}
 	if got := (&Config{DeregisterCriticalAfter: 600}).deregisterCriticalAfter(); got != 10*time.Minute {
 		t.Fatalf("custom deregister critical after = %s", got)
-	}
-}
-
-func TestConsulCheckURLUsesReadyPath(t *testing.T) {
-	if got := consulCheckURL("10.0.1.5:7801", "/ready"); got != "http://10.0.1.5:7801/ready" {
-		t.Fatalf("check url = %q", got)
-	}
-}
-
-func TestConsulServiceCheckDefaultsToTTL(t *testing.T) {
-	check, usesTTL, err := consulServiceCheck(Config{}, "check-inst-1", "10.0.1.5:7801")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !usesTTL || check.TTL != "30s" || check.HTTP != "" {
-		t.Fatalf("TTL check = %+v, usesTTL=%v", check, usesTTL)
-	}
-	if check.DeregisterCriticalServiceAfter != "300s" {
-		t.Fatalf("deregister delay = %q", check.DeregisterCriticalServiceAfter)
-	}
-}
-
-func TestConsulServiceCheckSupportsHTTPReadiness(t *testing.T) {
-	check, usesTTL, err := consulServiceCheck(Config{CheckType: "http"}, "check-inst-1", "10.0.1.5:7801")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if usesTTL || check.TTL != "" || check.HTTP != "http://10.0.1.5:7801/ready" {
-		t.Fatalf("HTTP check = %+v, usesTTL=%v", check, usesTTL)
 	}
 }
 
@@ -260,23 +199,6 @@ func TestValidateServiceRejectsInvalidGRPCAddress(t *testing.T) {
 	}
 }
 
-func TestConsulHTTPHealthCheckDoesNotFollowRegistryTLS(t *testing.T) {
-	check, usesTTL, err := consulServiceCheck(Config{CheckType: "http", TLS: TLSConfig{Enable: true}}, "check-inst-1", "10.0.1.5:7801")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if usesTTL || check.HTTP != "http://10.0.1.5:7801/ready" {
-		t.Fatalf("health check unexpectedly followed registry TLS: %+v", check)
-	}
-	check, _, err = consulServiceCheck(Config{CheckType: "http", CheckTLS: true}, "check-inst-1", "10.0.1.5:7801")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if check.HTTP != "https://10.0.1.5:7801/ready" {
-		t.Fatalf("explicit check TLS not applied: %q", check.HTTP)
-	}
-}
-
 func TestServiceFilters(t *testing.T) {
 	services := []Service{
 		{InstanceID: "v1", Version: "v1", Meta: map[string]string{"region": "cn", "canary": "false"}},
@@ -330,29 +252,6 @@ func TestGenerateInstanceID(t *testing.T) {
 	id2 := GenerateInstanceID("mf-user")
 	if id == id2 {
 		t.Errorf("two generated IDs should differ: %q == %q", id, id2)
-	}
-}
-
-func TestEtcdDeleteEventIncludesInstanceID(t *testing.T) {
-	event, ok := etcdEvent("/svc/mf-user/", "mf-user", &clientv3.Event{
-		Type: clientv3.EventTypeDelete,
-		Kv:   &mvccpb.KeyValue{Key: []byte("/svc/mf-user/inst-1")},
-	})
-	if !ok || event.Service.InstanceID != "inst-1" {
-		t.Fatalf("event = %+v ok=%v", event, ok)
-	}
-}
-
-func TestEtcdEventRejectsPayloadKeyMismatch(t *testing.T) {
-	event, ok := etcdEvent("/svc/mf-user/", "mf-user", &clientv3.Event{
-		Type: clientv3.EventTypePut,
-		Kv: &mvccpb.KeyValue{
-			Key:   []byte("/svc/mf-user/inst-1"),
-			Value: []byte(`{"name":"mf-user","instance_id":"inst-2","addr":"10.0.1.5:7801"}`),
-		},
-	})
-	if ok || event.Service.InstanceID != "inst-2" {
-		t.Fatalf("mismatched event = %+v ok=%v, want rejected", event, ok)
 	}
 }
 
@@ -516,27 +415,13 @@ func TestNew_unsupportedType(t *testing.T) {
 	}
 }
 
-func TestNew_etcdNoEndpoints(t *testing.T) {
-	_, err := New(Config{Type: "etcd"})
-	if err == nil {
-		t.Fatal("expected error for empty etcd endpoints")
-	}
-}
-
-func TestNew_consulNoAddress(t *testing.T) {
-	_, err := New(Config{Type: "consul"})
-	if err == nil {
-		t.Fatal("expected error for empty consul address")
-	}
-}
-
-func TestNew_defaultTypeIsEtcd(t *testing.T) {
-	_, err := New(Config{}) // no type, no endpoints → etcd path → should fail on no endpoints
+func TestNew_defaultBackendMustBeRegistered(t *testing.T) {
+	_, err := New(Config{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "etcd") {
-		t.Errorf("default type should route to etcd, got error: %v", err)
+	if !strings.Contains(err.Error(), "register a backend") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
 

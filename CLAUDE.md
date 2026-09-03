@@ -5,9 +5,9 @@
 - `boot/` — 服务启动（Config/Logger/DB/Redis/gRPC/Registry/RemoteConfig）
 - `log/` — 统一日志接口（slog + traceId + lumberjack file rotation）
 - `resp/` — 统一 HTTP 响应（Ok/Fail/Page/Error/FailStatus）
-- `mid/` — 中间件（JWT/CORS/Recovery/RateLimit）
+- `mid/` — 核心中间件（CORS/Recovery/RateLimit/Trace/gRPC）；JWT 位于 `contrib/mid/jwt`
 - `store/` — 数据访问基础类型（ListOpts）
-- `registry/` — 服务注册与发现（etcd / consul）
+- `registry/` — 服务注册与发现抽象（具体后端位于 `contrib/registry/*`）
 - `grpcx/` — gRPC client helper（traceId + keepalive + TLS/custom credentials）
 - `example/` — 完整示例服务
 - `docs/` — 开发规范 + 快速开始
@@ -20,10 +20,9 @@
 
 ## 依赖版本基线与升级
 
-当前主分支依赖基线（具体以根目录 `go.mod` 为准）：etcd API/client/client/pkg `v3.7.1`、
-Consul API `v1.34.4`、Redis client `v9.22.0`、Prometheus client `v1.24.1`、
-OpenTelemetry 核心/SDK/trace/OTLP HTTP `v1.46.0`、gRPC `v1.83.2`、GORM `v1.31.2`
-（PostgreSQL 驱动 `v1.6.2`）。
+当前主分支核心依赖基线（具体以根目录 `go.mod` 为准）：Redis client `v9.22.0`、
+Prometheus client `v1.24.1`、OpenTelemetry 核心/SDK/trace `v1.46.0`、
+gRPC `v1.83.2`、GORM `v1.31.2`。etcd、Consul、OTLP exporter 和迁移工具位于 `contrib` 独立模块。
 
 升级时 etcd 与 OTel 模块必须保持版本对齐，并执行 `go mod tidy` 检查间接依赖和 API 兼容性。
 提交前运行 `go test ./...`、`go test -race ./...`、`go vet ./...`、`go mod verify`、

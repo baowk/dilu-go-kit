@@ -7,15 +7,16 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 - **boot** — 一行启动服务（Config + DB + Redis + gRPC + 注册 + 远程配置 + 优雅关闭）
 - **boot.Component** — 统一后台任务启动、停止和反向关闭
 - **log** — 统一日志接口（slog 实现，traceId 自动注入，支持 console/file/both 输出）
-- **mid** — 可配置中间件（Trace + Recovery + Logger + ErrorHandler + JWT + CORS + RateLimit）
+- **mid** — 核心中间件（Trace + Recovery + Logger + ErrorHandler + CORS + RateLimit）
+- **contrib/mid/jwt** — 可选 JWT 认证中间件（按需引入）
 - **resp** — 统一 HTTP 响应（Ok / Fail / Page / Error）+ 标准错误码
 - **apperr** — transport-neutral 业务错误及 HTTP/gRPC 安全映射
 - **store** — 数据访问层基础类型（ListOpts 分页）
-- **stream** — Redis Stream 基础封装（发布、消费组、读取、ACK、死信）
+- **contrib/stream/redis** — Redis Stream 基础封装（发布、消费组、读取、ACK、死信）
 - **stream tracing** — 发布时注入 W3C trace context，消费时可恢复上游上下文
 - **clientx** — 服务客户端基础能力（重试、熔断、gRPC 错误码映射）
-- **migratex** — PostgreSQL SQL 迁移封装（up/down/version/force/create）
-- **registry** — 服务注册与发现（etcd / consul）
+- **contrib/migrate/postgres** — PostgreSQL SQL 迁移封装与 CLI（up/down/version/force/create）
+- **registry** — 厂商无关的服务注册与发现抽象
 - **registry.Resolver** — 客户端 Watch 缓存、RoundRobin/Random 负载均衡与可选版本/标签过滤
 - **notify** — 通用 HTTP 事件推送（支持 traceId 透传）
 - **metrics** — Prometheus HTTP/gRPC 指标（支持运行时服务名）
@@ -27,7 +28,8 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 - **cmd/dilu** — AI 友好的服务与资源脚手架
 - **grpcx.DialService** — 注册中心服务名拨号 + 健康实例 round_robin
 - **metadata** — HTTP/gRPC 共用的 trace ID 元数据传播
-- **registry.Registry** — 注册发现抽象，内置 etcd/Consul，可注册自定义后端
+- **registry.Registry** — 注册发现抽象；具体后端通过 `contrib` 模块按需引入
+- **contrib/** — 独立 Go module 的可选第三方扩展（etcd、Consul 等）
 
 ## 安装
 
@@ -48,13 +50,35 @@ gRPC 服务可在配置中设置 `grpc.requestTimeout` 和 `grpc.maxConcurrent`�
 `grpcx.DialOption{DefaultRequestTimeout: ...}` 设置默认 RPC deadline。Kubernetes 或 DNS
 部署可直接使用 `grpcx.DialDNS(ctx, "user-service.default.svc.cluster.local:9000")`，无需注册中心。
 
-注册中心不与具体产品绑定。除内置 etcd/Consul 外，可在启动时注册自定义后端：
+注册中心不与具体产品绑定。核心模块不包含任何厂商 SDK；请按需引入并注册适配器：
 
 ```go
 _ = registry.RegisterBackend("nacos", func(cfg registry.Config) (registry.Registry, error) {
     return nacosregistry.New(cfg)
 })
 ```
+
+可选 adapter 位于独立 Go module：`contrib/registry/etcd` 与 `contrib/registry/consul`。业务代码只依赖
+`registry.Registry`；仅消费服务发现时可依赖更小的 `registry.Discovery`，新后端实现
+`Registrar`、`Discoverer`、`Watcher` 的全部或部分接口即可。
+
+使用前安装所需扩展，例如：`go get github.com/baowk/dilu-go-kit/contrib/registry/etcd@latest`。
+
+应用需要在启动前显式注册所选 adapter（以下 import 路径是独立 module）：
+
+```go
+import (
+    "github.com/baowk/dilu-go-kit/registry"
+    "github.com/baowk/dilu-go-kit/contrib/registry/etcd"
+)
+
+if err := etcd.Register(); err != nil { panic(err) }
+reg, err := registry.New(registry.Config{Type: "etcd", Endpoints: []string{"127.0.0.1:2379"}})
+```
+
+远程配置还可注入 `registry.KVStore`；自定义注册中心只要提供 `Get`/`WatchKey`，就能复用
+`boot.LoadRemoteConfigFromStore` 和 `boot.WatchRemoteConfigFromStore`，无需再为该后端修改 `boot`。
+服务级与节点级配置合并可使用 `boot.MergeRemoteConfigFromStore`。
 
 ## AI 友好的契约和脚手架
 
@@ -127,20 +151,24 @@ func main() {
 }
 ```
 
-详见 [docs/quickstart.md](docs/quickstart.md) 和 [example/](example/)。
+详见 [docs/quickstart.md](docs/quickstart.md) 和 [example/](example/)。仓库提供两种示例：
+`example/cmd` 是包含 PostgreSQL/Redis 能力的 service，`example/gateway` 是仅 HTTP、内存限流的 gateway。
+`example` 是独立 Go module，运行示例前请先进入 `example/` 目录执行 `go mod tidy`。
 
 ## 目录
 
 ```
 boot/       服务启动（Config/DB/Redis/gRPC/Registry/RemoteConfig/Logger）
 log/        统一日志接口（Logger 接口 + slog 实现 + traceId + lumberjack file rotation）
-mid/        中间件（Trace/Recovery/Logger/ErrorHandler/JWT/CORS/RateLimit/Default/gRPC interceptor）
+mid/        核心中间件（Trace/Recovery/Logger/ErrorHandler/CORS/RateLimit/Default/gRPC interceptor）
+contrib/mid/jwt/  可选 JWT 认证中间件
 resp/       统一 HTTP 响应 + 标准错误码
 store/      数据访问基础类型（ListOpts）
-stream/     Redis Stream 基础封装
+contrib/stream/redis/     Redis Stream 基础封装（可选）
 clientx/    服务客户端重试、熔断、错误码映射
-migratex/   PostgreSQL SQL 迁移封装
-registry/   服务注册与发现（etcd / consul）
+contrib/migrate/postgres/   PostgreSQL SQL 迁移封装与 CLI
+registry/   服务注册与发现抽象（后端位于 contrib/registry）
+contrib/    可选第三方扩展（etcd、Consul 等独立 Go module）
 api/        Proto 服务契约（Buf 管理）
 cmd/dilu/    服务/资源脚手架与生成入口
 notify/     通用事件推送
@@ -181,38 +209,40 @@ log:
 mid.Default(r, mid.DefaultConfig{...})
 
 // 方式二：单独使用
-r.Use(mid.Trace())         // traceId 生成/传递，X-Request-Id 仅作兼容别名
+r.Use(mid.Trace())         // traceId 生成/传递（X-Trace-Id）
 r.Use(mid.Recovery())      // panic 恢复
 r.Use(mid.ErrorHandler())  // AppError 捕获
 r.Use(mid.Logger())        // 请求日志（method/path/status/latency/traceId）
 r.Use(mid.CORS())          // CORS（支持 whitelist）
 r.Use(mid.RateLimit(100, time.Minute))  // 限流
 
-// 可配置限流：默认 memory；传 Redis client 后可切换分布式限流
+// 可配置限流：核心模块提供 memory；Redis 分布式限流见 contrib/mid/ratelimit/redis
 r.Use(mid.RateLimitFromConfig(mid.AccessLimitCfg{
     Enable: true,
     Total: 300,
     Duration: 5,
-    Backend: "redis",
-    Redis: app.Redis,
-    KeyPrefix: "gateway:ratelimit",
+    Backend: "memory",
 }))
 
+// Redis adapter（需显式引入 contrib/mid/ratelimit/redis）
+// r.Use(redisrate.RedisRateLimit(redisrate.RedisRateLimitConfig{Client: app.Redis, Max: 300, Window: 5*time.Second}))
+
 // JWT 认证：token 必须包含 exp；workspace_id/wid 使用整数或十进制字符串
-auth := r.Group("/v1").Use(mid.JWT(mid.JWTConfig{
+// 需引入 github.com/baowk/dilu-go-kit/contrib/mid/jwt，并命名为 jwtmid
+auth := r.Group("/v1").Use(jwtmid.JWT(jwtmid.JWTConfig{
     Secret: jwtSecret,
     Issuer: "auth-service",
     Audience: []string{"my-service"},
 }))
-uid := mid.GetUID(c)
-workspaceID := mid.GetWorkspaceID(c)
-tenantID := mid.GetTenantID(c)
-shopIDs := mid.GetShopIDs(c)
-scopes := mid.GetScopes(c)
-nickname := mid.GetNickname(c)
+uid := jwtmid.GetUID(c)
+workspaceID := jwtmid.GetWorkspaceID(c)
+tenantID := jwtmid.GetTenantID(c)
+shopIDs := jwtmid.GetShopIDs(c)
+scopes := jwtmid.GetScopes(c)
+nickname := jwtmid.GetNickname(c)
 
 // 仅在可信网关已剥离外部身份头时开启 HeaderUID 信任模式
-r.Group("/internal").Use(mid.JWT(mid.JWTConfig{
+r.Group("/internal").Use(jwtmid.JWT(jwtmid.JWTConfig{
     HeaderUID:      "x-user-id",
     HeaderTenantID: "x-tenant-id",
     HeaderWorkspaceID: "x-workspace-id",
@@ -411,7 +441,19 @@ telemetry:
 `boot.New` 会自动给 Gin 和 boot 创建的 gRPC server 添加 tracing。自建 gRPC client
 可传入 `grpcx.DialOption{Telemetry: app.Telemetry}`。
 
-通过 `boot.New` 创建的 DB 和 Redis 客户端在 OTel 开启后也会自动注册基础埋点；
+OTLP HTTP exporter 位于独立模块 `contrib/telemetry/otlphttp`。启用 telemetry 前注册：
+
+```go
+_ = otlphttp.Register()
+```
+
+DB 和 Redis 的 OTel 埋点属于可选 contrib 适配器，不再由 `boot` 隐式加载。需要时显式接入：
+
+```go
+db.Use(gormotel.NewGORMPlugin(app.Telemetry))
+app.Redis.AddHook(redisotel.NewRedisHook(app.Telemetry))
+```
+
 Redis Stream 操作可将 provider 放入上下文：
 
 ```go
@@ -456,7 +498,7 @@ notify.SendContext(ctx, "proxy", payload)  // 自动携带 traceId
 ## Redis Stream
 
 ```go
-import "github.com/baowk/dilu-go-kit/stream"
+import "github.com/baowk/dilu-go-kit/contrib/stream/redis"
 
 id, err := stream.Publish(ctx, app.Redis, "sync.tasks", map[string]any{
     "task_id": "123",
@@ -488,9 +530,9 @@ services/order-service/
 ```
 
 ```bash
-go run github.com/baowk/dilu-go-kit/cmd/migrate -dir services/order-service/migrations create -name init
+go run github.com/baowk/dilu-go-kit/contrib/migrate/postgres/cmd/migrate -dir services/order-service/migrations create -name init
 DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
-  go run github.com/baowk/dilu-go-kit/cmd/migrate -dir services/order-service/migrations up
+  go run github.com/baowk/dilu-go-kit/contrib/migrate/postgres/cmd/migrate -dir services/order-service/migrations up
 ```
 
 迁移版本是严格递增的十进制整数。`migrate create` 使用 UTC UnixNano，并保证同一进程内
@@ -498,7 +540,7 @@ DATABASE_DSN='postgres://user:pass@127.0.0.1:5432/order_db?sslmode=disable' \
 
 ## 服务注册与发现
 
-支持 etcd 和 consul 两种后端：
+通过可选 contrib adapter 支持 etcd 和 Consul（也可实现自己的后端）：
 
 ```yaml
 # etcd
@@ -518,9 +560,9 @@ registry:
   deregisterCriticalAfter: 300  # critical 后 5 分钟自动摘除，建议 300-600 秒
 ```
 
-服务启动自动注册，关闭自动注销。`boot` 中的 Consul 默认检查实例
-`/ready`，避免把存活检查和就绪检查混用。独立使用 `registry.NewConsul`
-时为了兼容已有服务，`checkType` 默认仍为 `ttl`。
+服务启动自动注册，关闭自动注销。引入 adapter 并注册后，`boot` 中的 Consul 默认检查实例
+`/ready`，避免把存活检查和就绪检查混用。独立使用 `contrib/registry/consul.New`
+时为了兼容已有服务，`checkType` 默认仍为 `ttl`。核心模块本身不依赖 etcd/Consul SDK。
 
 网关应使用 `registry.WatchUpstreams` 实时发现变更。healthy 实例临时为空时，
 它会保留 last known good upstreams 并标记 `stale=true`；默认 30 秒后
@@ -529,7 +571,7 @@ registry:
 
 ## 远程配置
 
-复用 registry 连接，从 etcd/consul KV 加载配置并热更新：
+复用已注册 registry 连接，从后端 KV 加载配置并热更新：
 
 ```yaml
 registry:

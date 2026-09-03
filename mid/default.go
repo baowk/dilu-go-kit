@@ -9,7 +9,6 @@ import (
 	kitlog "github.com/baowk/dilu-go-kit/log"
 	"github.com/baowk/dilu-go-kit/resp"
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 )
 
 // DefaultConfig holds settings for the Default middleware chain.
@@ -24,8 +23,7 @@ type AccessLimitCfg struct {
 	Enable    bool
 	Total     int    // max requests per window (default 300)
 	Duration  int    // window in seconds (default 5)
-	Backend   string // memory (default) or redis
-	Redis     redis.Cmdable
+	Backend   string // memory (default); Redis implementation is in contrib
 	KeyPrefix string
 }
 
@@ -55,7 +53,8 @@ func Default(r *gin.Engine, cfg DefaultConfig) {
 	}
 }
 
-// RateLimitFromConfig returns a memory or Redis-backed rate limiter based on cfg.
+// RateLimitFromConfig returns the core in-memory limiter. Redis configuration
+// falls back to memory; use contrib/mid/ratelimit/redis for distributed limits.
 func RateLimitFromConfig(cfg AccessLimitCfg) gin.HandlerFunc {
 	total := cfg.Total
 	if total <= 0 {
@@ -67,19 +66,11 @@ func RateLimitFromConfig(cfg AccessLimitCfg) gin.HandlerFunc {
 	}
 	window := time.Duration(dur) * time.Second
 	backend := strings.ToLower(strings.TrimSpace(cfg.Backend))
-	if backend == "redis" && cfg.Redis != nil {
-		return RedisRateLimit(RedisRateLimitConfig{
-			Client:    cfg.Redis,
-			Max:       total,
-			Window:    window,
-			KeyPrefix: cfg.KeyPrefix,
-		})
-	}
-	if backend == "redis" && cfg.Redis == nil {
-		kitlog.Warn("redis rate limiter unavailable; falling back to bounded in-memory limiter")
+	if backend == "" || backend == "memory" {
 		return RateLimit(total, window)
 	}
-	if backend == "" || backend == "memory" {
+	if backend == "redis" {
+		kitlog.Warn("redis rate limiter is provided by contrib; falling back to bounded in-memory limiter")
 		return RateLimit(total, window)
 	}
 	kitlog.Error("unknown rate limiter backend; refusing to silently fall back", "backend", cfg.Backend)

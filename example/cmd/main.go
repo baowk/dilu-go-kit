@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/boot"
+	jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/router"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/store"
 	"github.com/baowk/dilu-go-kit/metrics"
@@ -44,7 +45,7 @@ func main() {
 			AccessLimit: mid.AccessLimitCfg{
 				Enable: cfg.AccessLimit.Enable, Total: cfg.AccessLimit.Total,
 				Duration: cfg.AccessLimit.Duration, Backend: cfg.AccessLimit.Backend,
-				Redis: a.Redis, KeyPrefix: cfg.AccessLimit.KeyPrefix,
+				KeyPrefix: cfg.AccessLimit.KeyPrefix,
 			},
 		})
 
@@ -58,7 +59,7 @@ func main() {
 		a.Gin.GET("/metrics", metrics.Handler())
 
 		// Business routes are protected by JWT in router.Init.
-		router.Init(a.Gin, mid.JWTConfig{
+		router.Init(a.Gin, jwtmid.JWTConfig{
 			Secret: cfg.JWT.Secret, Issuer: cfg.JWT.Issuer,
 			Subject: cfg.JWT.Subject, Audience: cfg.JWT.Audience,
 		})

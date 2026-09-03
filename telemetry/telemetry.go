@@ -18,7 +18,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -39,6 +38,34 @@ type Config struct {
 	Insecure       bool    `mapstructure:"insecure"`
 	SampleRatio    float64 `mapstructure:"sampleRatio"`
 	SampleRatioSet bool    `mapstructure:"sampleRatioSet"`
+}
+
+// ExporterFactory creates a span exporter for a telemetry configuration.
+// Exporters are optional adapters registered by contrib modules.
+type ExporterFactory func(context.Context, Config) (sdktrace.SpanExporter, error)
+
+var (
+	exporterMu sync.RWMutex
+	exporters  = map[string]ExporterFactory{}
+)
+
+// RegisterExporter registers or replaces a named exporter implementation.
+func RegisterExporter(name string, factory ExporterFactory) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" || factory == nil {
+		return fmt.Errorf("telemetry: invalid exporter registration")
+	}
+	exporterMu.Lock()
+	exporters[name] = factory
+	exporterMu.Unlock()
+	return nil
+}
+
+func exporterFor(name string) ExporterFactory {
+	exporterMu.RLock()
+	factory := exporters[strings.ToLower(strings.TrimSpace(name))]
+	exporterMu.RUnlock()
+	return factory
 }
 
 // Provider owns the tracer provider and propagator used by one application.
@@ -92,22 +119,14 @@ func Init(ctx context.Context, cfg Config) (*Provider, error) {
 		return nil, err
 	}
 
-	options := make([]otlptracehttp.Option, 0, 2)
 	if endpoint != "" {
-		if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
-			options = append(options, otlptracehttp.WithEndpointURL(endpoint))
-		} else {
-			options = append(options, otlptracehttp.WithEndpoint(endpoint))
-		}
+		cfg.Endpoint = endpoint
 	}
-	envInsecure := strings.EqualFold(strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")), "true")
-	if strings.HasPrefix(endpoint, "http://") && !cfg.Insecure && !envInsecure {
-		return nil, fmt.Errorf("telemetry: insecure HTTP endpoint requires Insecure=true or OTEL_EXPORTER_OTLP_INSECURE=true")
+	factory := exporterFor("otlphttp")
+	if factory == nil {
+		return nil, fmt.Errorf("telemetry: exporter %q is not registered; import contrib/telemetry/otlphttp", "otlphttp")
 	}
-	if cfg.Insecure || envInsecure {
-		options = append(options, otlptracehttp.WithInsecure())
-	}
-	exporter, err := otlptracehttp.New(ctx, options...)
+	exporter, err := factory(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

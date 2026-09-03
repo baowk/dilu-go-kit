@@ -21,7 +21,7 @@ import (
 // Targets use the form registry:///service-name. The builder keeps the gRPC
 // ClientConn updated as instances register, deregister, or become unhealthy.
 type RegistryResolverBuilder struct {
-	Registry kitregistry.Registry
+	Registry kitregistry.Discovery
 	// InitialDiscoveryTimeout bounds the synchronous Watch/Discover calls used
 	// to seed the resolver. Zero uses five seconds.
 	InitialDiscoveryTimeout time.Duration
@@ -131,7 +131,7 @@ func updateResolverState(cc grpcresolver.ClientConn, services []kitregistry.Serv
 // DialService dials a service by registry name and uses gRPC round_robin over
 // the currently healthy instances. It preserves all DialOption behavior,
 // including TLS, retries, keepalive, and telemetry.
-func DialService(ctx context.Context, r kitregistry.Registry, service string, opts ...DialOption) (*grpc.ClientConn, error) {
+func DialService(ctx context.Context, r kitregistry.Discovery, service string, opts ...DialOption) (*grpc.ClientConn, error) {
 	service = strings.TrimSpace(service)
 	if r == nil {
 		return nil, errors.New("grpcx: registry is nil")

@@ -1,4 +1,4 @@
-package registry
+package etcd
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/baowk/dilu-go-kit/registry"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -22,6 +23,9 @@ type etcdRegistry struct {
 	cancels map[string]context.CancelFunc // instanceID → keepalive cancel
 }
 
+var _ core.Registry = (*etcdRegistry)(nil)
+var _ core.KVStore = (*etcdRegistry)(nil)
+
 // NewEtcd creates a new etcd-backed registry.
 func NewEtcd(cfg Config) (Registry, error) {
 	if len(cfg.Endpoints) == 0 {
@@ -34,7 +38,7 @@ func NewEtcd(cfg Config) (Registry, error) {
 	}
 	client, err := clientv3.New(clientv3.Config{
 		Endpoints:   cfg.Endpoints,
-		DialTimeout: cfg.dialTimeout(),
+		DialTimeout: cfg.EffectiveDialTimeout(),
 		TLS:         tlsConfig,
 		Username:    cfg.Username,
 		Password:    cfg.Password,
@@ -44,7 +48,7 @@ func NewEtcd(cfg Config) (Registry, error) {
 	}
 
 	// Verify connectivity
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.dialTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.EffectiveDialTimeout())
 	defer cancel()
 	var statusErr error
 	for _, endpoint := range cfg.Endpoints {
@@ -66,6 +70,74 @@ func NewEtcd(cfg Config) (Registry, error) {
 		leases:  make(map[string]clientv3.LeaseID),
 		cancels: make(map[string]context.CancelFunc),
 	}, nil
+}
+
+// Get reads a raw key for the optional remote-configuration capability.
+func (r *etcdRegistry) Get(ctx context.Context, key string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resp, err := r.client.Get(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("registry: etcd get %q: %w", key, err)
+	}
+	if len(resp.Kvs) == 0 {
+		return nil, ErrKeyNotFound
+	}
+	return append([]byte(nil), resp.Kvs[0].Value...), nil
+}
+
+// WatchKey watches a raw key until ctx is cancelled.
+func (r *etcdRegistry) WatchKey(ctx context.Context, key string, onChange func([]byte)) error {
+	if onChange == nil {
+		return errors.New("registry: watch callback is nil")
+	}
+	return watchEtcdKey(ctx, r, key, onChange)
+}
+
+func watchEtcdKey(ctx context.Context, r *etcdRegistry, key string, onChange func([]byte)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var revision int64
+	for ctx.Err() == nil {
+		if revision == 0 {
+			resp, err := r.client.Get(ctx, key)
+			if err != nil {
+				if !waitForContext(ctx, time.Second) {
+					return ctx.Err()
+				}
+				continue
+			}
+			revision = resp.Header.Revision + 1
+			if len(resp.Kvs) == 0 {
+				onChange(nil)
+			} else {
+				onChange(append([]byte(nil), resp.Kvs[0].Value...))
+			}
+		}
+		ch := r.client.Watch(ctx, key, clientv3.WithRev(revision))
+		for resp := range ch {
+			if err := resp.Err(); err != nil {
+				revision = 0
+				break
+			}
+			if resp.Header.Revision > 0 {
+				revision = resp.Header.Revision + 1
+			}
+			for _, ev := range resp.Events {
+				if ev.Type == clientv3.EventTypeDelete {
+					onChange(nil)
+				} else if ev.Kv != nil {
+					onChange(append([]byte(nil), ev.Kv.Value...))
+				}
+			}
+		}
+		if ctx.Err() == nil && !waitForContext(ctx, time.Second) {
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
 }
 
 func (r *etcdRegistry) Register(ctx context.Context, svc Service) error {
@@ -109,13 +181,13 @@ func (r *etcdRegistry) Register(ctx context.Context, svc Service) error {
 		"instance", svc.InstanceID,
 		"addr", svc.Addr,
 		"grpc", svc.GRPCAddr,
-		"ttl", r.cfg.ttl(),
+		"ttl", r.cfg.EffectiveTTL(),
 	)
 	return nil
 }
 
 func (r *etcdRegistry) grantAndPut(ctx context.Context, svc Service) (clientv3.LeaseID, error) {
-	lease, err := r.client.Grant(ctx, r.cfg.ttl())
+	lease, err := r.client.Grant(ctx, r.cfg.EffectiveTTL())
 	if err != nil {
 		return 0, fmt.Errorf("registry: grant lease: %w", err)
 	}
@@ -124,7 +196,7 @@ func (r *etcdRegistry) grantAndPut(ctx context.Context, svc Service) (clientv3.L
 		_, _ = r.client.Revoke(ctx, lease.ID)
 		return 0, fmt.Errorf("registry: marshal: %w", err)
 	}
-	key := serviceKey(r.cfg.prefix(), svc.Name, svc.InstanceID)
+	key := serviceKey(r.cfg.EffectivePrefix(), svc.Name, svc.InstanceID)
 	if _, err := r.client.Put(ctx, key, val, clientv3.WithLease(lease.ID)); err != nil {
 		_, _ = r.client.Revoke(ctx, lease.ID)
 		return 0, fmt.Errorf("registry: put: %w", err)
@@ -147,7 +219,7 @@ func (r *etcdRegistry) keepAliveLoop(ctx context.Context, svc Service, leaseID c
 		}
 		slog.Warn("registry: etcd keepalive interrupted; re-registering", "service", svc.Name, "instance", svc.InstanceID, "error", err)
 		for ctx.Err() == nil {
-			registerCtx, cancel := context.WithTimeout(ctx, r.cfg.dialTimeout())
+			registerCtx, cancel := context.WithTimeout(ctx, r.cfg.EffectiveDialTimeout())
 			newLease, registerErr := r.grantAndPut(registerCtx, svc)
 			cancel()
 			if registerErr == nil {
@@ -198,7 +270,7 @@ func (r *etcdRegistry) Deregister(ctx context.Context, name, instanceID string) 
 	}
 	r.mu.Unlock()
 
-	key := serviceKey(r.cfg.prefix(), name, instanceID)
+	key := serviceKey(r.cfg.EffectivePrefix(), name, instanceID)
 	_, deleteErr := r.client.Delete(ctx, key)
 	var revokeErr error
 	if leaseID != 0 {
@@ -226,7 +298,7 @@ func (r *etcdRegistry) Discover(ctx context.Context, name string) ([]Service, er
 	if err := validateServiceName(name); err != nil {
 		return nil, err
 	}
-	prefix := servicePrefixKey(r.cfg.prefix(), name)
+	prefix := servicePrefixKey(r.cfg.EffectivePrefix(), name)
 	resp, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("registry: get: %w", err)
@@ -261,7 +333,7 @@ func (r *etcdRegistry) Watch(ctx context.Context, name string) (<-chan Event, er
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prefix := servicePrefixKey(r.cfg.prefix(), name)
+	prefix := servicePrefixKey(r.cfg.EffectivePrefix(), name)
 	snapshot, err := r.client.Get(ctx, prefix, clientv3.WithPrefix())
 	if err != nil {
 		return nil, fmt.Errorf("registry: etcd watch snapshot: %w", err)
@@ -359,38 +431,6 @@ func etcdEvent(prefix, name string, ev *clientv3.Event) (Event, bool) {
 		return Event{Type: EventDelete, Service: Service{Name: name, InstanceID: instanceID}}, instanceID != ""
 	}
 	return Event{}, false
-}
-
-func serviceInstanceFromKey(prefix string, key []byte) (string, bool) {
-	keyString := string(key)
-	if prefix == "" || !strings.HasPrefix(keyString, prefix) {
-		return "", false
-	}
-	instanceID := strings.TrimPrefix(keyString, prefix)
-	if instanceID == "" || strings.Contains(instanceID, "/") || strings.ContainsAny(instanceID, "\r\n\x00") || len(instanceID) > 256 {
-		return "", false
-	}
-	return instanceID, true
-}
-
-func sendEvent(ctx context.Context, ch chan<- Event, event Event) bool {
-	select {
-	case ch <- event:
-		return true
-	case <-ctx.Done():
-		return false
-	}
-}
-
-func waitForContext(ctx context.Context, d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }
 
 func (r *etcdRegistry) Close() error {

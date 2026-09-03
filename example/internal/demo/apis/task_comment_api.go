@@ -4,10 +4,10 @@ import (
 	"errors"
 	"net/http"
 
+	jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/service/dto"
 	"github.com/baowk/dilu-go-kit/log"
-	"github.com/baowk/dilu-go-kit/mid"
 	"github.com/baowk/dilu-go-kit/resp"
 	base "github.com/baowk/dilu-go-kit/store"
 	"github.com/gin-gonic/gin"
@@ -57,7 +57,7 @@ func (a *TaskCommentAPI) Create(c *gin.Context) {
 	if !ok {
 		return
 	}
-	uid := mid.GetUID(c)
+	uid := jwtmid.GetUID(c)
 	if uid == 0 {
 		resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 		return
@@ -95,7 +95,7 @@ func (a *TaskCommentAPI) Delete(c *gin.Context) {
 	if !ok {
 		return
 	}
-	uid := mid.GetUID(c)
+	uid := jwtmid.GetUID(c)
 	if uid <= 0 {
 		resp.FailStatus(c, http.StatusUnauthorized, resp.CodeUnauthorized, "未登录")
 		return

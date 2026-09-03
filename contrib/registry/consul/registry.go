@@ -1,7 +1,8 @@
-package registry
+package consul
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	core "github.com/baowk/dilu-go-kit/registry"
 	consul "github.com/hashicorp/consul/api"
 )
 
@@ -25,6 +27,9 @@ type consulRegistry struct {
 	cancels map[string]context.CancelFunc // instanceID → TTL refresh cancel
 }
 
+var _ core.Registry = (*consulRegistry)(nil)
+var _ core.KVStore = (*consulRegistry)(nil)
+
 // NewConsul creates a new Consul-backed registry.
 func NewConsul(cfg Config) (Registry, error) {
 	addr := cfg.Address
@@ -34,11 +39,11 @@ func NewConsul(cfg Config) (Registry, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("registry: no consul address configured")
 	}
-	if _, err := cfg.consulCheckType(); err != nil {
+	if _, err := cfg.EffectiveConsulCheckType(); err != nil {
 		return nil, err
 	}
 
-	probeCfg, err := consulProbeConfigWithTLS(addr, cfg.Token, cfg.TLS, cfg.dialTimeout())
+	probeCfg, err := consulProbeConfigWithTLS(addr, cfg.Token, cfg.TLS, cfg.EffectiveDialTimeout())
 	if err != nil {
 		return nil, fmt.Errorf("registry: consul probe client: %w", err)
 	}
@@ -63,6 +68,50 @@ func NewConsul(cfg Config) (Registry, error) {
 		checks:  make(map[string]string),
 		cancels: make(map[string]context.CancelFunc),
 	}, nil
+}
+
+// Get reads a raw Consul KV value.
+func (r *consulRegistry) Get(ctx context.Context, key string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pair, _, err := r.client.KV().Get(key, (&consul.QueryOptions{}).WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("registry: consul get %q: %w", key, err)
+	}
+	if pair == nil {
+		return nil, ErrKeyNotFound
+	}
+	return append([]byte(nil), pair.Value...), nil
+}
+
+// WatchKey watches a raw Consul KV value until ctx is cancelled.
+func (r *consulRegistry) WatchKey(ctx context.Context, key string, onChange func([]byte)) error {
+	if onChange == nil {
+		return errors.New("registry: watch callback is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var lastIndex uint64
+	for ctx.Err() == nil {
+		pair, meta, err := r.client.KV().Get(key, (&consul.QueryOptions{WaitIndex: lastIndex, WaitTime: 55 * time.Second}).WithContext(ctx))
+		if err != nil {
+			if !waitForContext(ctx, 2*time.Second) {
+				return ctx.Err()
+			}
+			continue
+		}
+		if meta != nil && meta.LastIndex != lastIndex {
+			lastIndex = meta.LastIndex
+			if pair == nil {
+				onChange(nil)
+			} else {
+				onChange(append([]byte(nil), pair.Value...))
+			}
+		}
+	}
+	return ctx.Err()
 }
 
 func consulConfig(addr, token string, tlsOptions ...TLSConfig) *consul.Config {
@@ -135,7 +184,7 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 		return fmt.Errorf("registry: invalid port %q", portStr)
 	}
 
-	ttl := r.cfg.ttl()
+	ttl := r.cfg.EffectiveTTL()
 	checkID := "check-" + svc.InstanceID
 	check, usesTTL, err := consulServiceCheck(r.cfg, checkID, checkAddr)
 	if err != nil {
@@ -213,25 +262,25 @@ func (r *consulRegistry) Register(ctx context.Context, svc Service) error {
 }
 
 func consulServiceCheck(cfg Config, checkID, checkAddr string) (*consul.AgentServiceCheck, bool, error) {
-	checkType, err := cfg.consulCheckType()
+	checkType, err := cfg.EffectiveConsulCheckType()
 	if err != nil {
 		return nil, false, err
 	}
 	check := &consul.AgentServiceCheck{
 		CheckID:                        checkID,
-		DeregisterCriticalServiceAfter: durationSeconds(cfg.deregisterCriticalAfter()),
+		DeregisterCriticalServiceAfter: durationSeconds(cfg.EffectiveDeregisterCriticalAfter()),
 	}
 	if checkType == "http" {
-		ttl := cfg.ttl()
+		ttl := cfg.EffectiveTTL()
 		// The service health endpoint is a separate transport from the Consul
 		// API. Do not infer its scheme from registry TLS; most services expose
 		// plain HTTP readiness even when Consul itself uses HTTPS.
-		check.HTTP = consulCheckURL(checkAddr, cfg.checkPath(), cfg.CheckTLS)
+		check.HTTP = consulCheckURL(checkAddr, cfg.EffectiveCheckPath(), cfg.CheckTLS)
 		check.Interval = fmt.Sprintf("%ds", ttl)
 		check.Timeout = fmt.Sprintf("%ds", minInt64(5, ttl))
 		return check, false, nil
 	}
-	check.TTL = fmt.Sprintf("%ds", cfg.ttl())
+	check.TTL = fmt.Sprintf("%ds", cfg.EffectiveTTL())
 	return check, true, nil
 }
 
@@ -482,7 +531,7 @@ func (r *consulRegistry) Close() error {
 	r.mu.Unlock()
 	r.wg.Wait()
 
-	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.dialTimeout())
+	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.EffectiveDialTimeout())
 	defer cancel()
 	for instanceID, checkID := range checks {
 		q := (&consul.QueryOptions{}).WithContext(ctx)

@@ -1,4 +1,4 @@
-package migratex
+package postgres
 
 import (
 	"path/filepath"

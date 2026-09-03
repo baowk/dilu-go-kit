@@ -1,19 +1,12 @@
-// Package registry provides service registration and discovery via etcd or consul.
+// Package registry provides vendor-neutral service registration and discovery
+// abstractions. Concrete backends live in optional contrib modules.
 //
-// Usage (etcd):
-//
-//	r, _ := registry.New(registry.Config{Type: "etcd", Endpoints: []string{"127.0.0.1:2379"}})
-//	r.Register(ctx, registry.Service{Name: "mf-user", Addr: ":7801"})
-//	defer r.Deregister(ctx, "mf-user", instanceID)
-//
-// Usage (consul):
-//
-//	r, _ := registry.New(registry.Config{Type: "consul", Address: "127.0.0.1:8500"})
-//	r.Register(ctx, registry.Service{Name: "mf-user", Addr: ":7801"})
-//	defer r.Deregister(ctx, "mf-user", instanceID)
+// Applications register an adapter (for example contrib/registry/etcd) and
+// then call registry.New with its configured backend type.
 //
 // Usage (gateway side):
 //
+//	// after importing/registering a contrib adapter
 //	r, _ := registry.New(cfg)
 //	services := r.Discover(ctx, "mf-user")
 //	ch := r.Watch(ctx, "mf-user") // live updates
@@ -22,6 +15,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -35,6 +29,9 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// ErrKeyNotFound indicates that a registry-backed key does not exist.
+var ErrKeyNotFound = errors.New("registry: key not found")
 
 // Service describes a registered service instance.
 type Service struct {
@@ -152,35 +149,58 @@ const (
 	EventDelete                  // service deregistered or lease expired
 )
 
-// Registry is the interface for service registration and discovery.
-type Registry interface {
-	// Register registers a service instance. Lease/check lifecycle depends on
-	// the selected backend and Consul check type.
+// Registrar registers and deregisters service instances.
+type Registrar interface {
 	Register(ctx context.Context, svc Service) error
-
-	// Deregister removes a service instance.
 	Deregister(ctx context.Context, name, instanceID string) error
+}
 
-	// Discover returns all healthy instances of a service.
+// Discoverer returns healthy service instances.
+type Discoverer interface {
 	Discover(ctx context.Context, name string) ([]Service, error)
+}
 
-	// Watch returns a channel of service change events.
-	// The channel is closed when ctx is cancelled.
+// Watcher observes service instance changes.
+type Watcher interface {
 	Watch(ctx context.Context, name string) (<-chan Event, error)
+}
 
+// Discovery combines the read-only discovery operations needed by resolvers.
+// It allows consumers to use a discovery backend without implementing service
+// registration methods.
+type Discovery interface {
+	Discoverer
+	Watcher
+}
+
+// KVStore is the optional key/value capability used by remote configuration.
+// Registry implementations that do not provide KV storage can still be used
+// for service discovery and registration.
+type KVStore interface {
+	Get(ctx context.Context, key string) ([]byte, error)
+	WatchKey(ctx context.Context, key string, onChange func([]byte)) error
+}
+
+// Registry is the combined registration and discovery interface. Implementers
+// may compose the smaller Registrar, Discoverer, and Watcher interfaces when a
+// deployment only needs a subset of the capabilities.
+type Registry interface {
+	Registrar
+	Discoverer
+	Watcher
 	// Close releases resources.
 	Close() error
 }
 
 // WatchUpstreams watches a service with bounded last-known-good fallback.
-func WatchUpstreams(ctx context.Context, r Registry, name string) (<-chan UpstreamSnapshot, error) {
+func WatchUpstreams(ctx context.Context, r Discovery, name string) (<-chan UpstreamSnapshot, error) {
 	return WatchUpstreamsWithOptions(ctx, r, name, WatchUpstreamsOptions{})
 }
 
 // WatchUpstreamsWithOptions watches a service and reconciles every event
 // against an authoritative Discover result. Last-known-good services expire
 // after StaleGracePeriod instead of remaining routable indefinitely.
-func WatchUpstreamsWithOptions(ctx context.Context, r Registry, name string, options WatchUpstreamsOptions) (<-chan UpstreamSnapshot, error) {
+func WatchUpstreamsWithOptions(ctx context.Context, r Discovery, name string, options WatchUpstreamsOptions) (<-chan UpstreamSnapshot, error) {
 	if r == nil {
 		return nil, fmt.Errorf("registry: registry is nil")
 	}
@@ -390,10 +410,7 @@ type Factory func(Config) (Registry, error)
 
 var (
 	factoryMu sync.RWMutex
-	factories = map[string]Factory{
-		"etcd":   NewEtcd,
-		"consul": NewConsul,
-	}
+	factories = map[string]Factory{}
 )
 
 // RegisterBackend registers or replaces a named registry backend. Register
@@ -427,7 +444,7 @@ func BackendNames() []string {
 
 // Config for the registry.
 type Config struct {
-	Type                    string    `mapstructure:"type"`                    // "etcd" (default), "consul", or a registered backend
+	Type                    string    `mapstructure:"type"`                    // backend name (default "etcd"), must be registered
 	Endpoints               []string  `mapstructure:"endpoints"`               // etcd endpoints, e.g. ["127.0.0.1:2379"]
 	Address                 string    `mapstructure:"address"`                 // consul address, e.g. "127.0.0.1:8500"
 	Token                   string    `mapstructure:"token"`                   // consul ACL token (optional)
@@ -470,9 +487,19 @@ func (c *Config) registryType() string {
 	return "etcd"
 }
 
-// New creates a registry using the factory registered for Config.Type. The
-// built-in backends are etcd (default) and Consul; applications can register
-// additional implementations with RegisterBackend.
+// Exported helpers are used by optional contrib adapters. The Effective
+// prefix avoids colliding with the corresponding Config field names.
+func (c Config) EffectivePrefix() string                         { return c.prefix() }
+func (c Config) EffectiveTTL() int64                             { return c.ttl() }
+func (c Config) EffectiveDialTimeout() time.Duration             { return c.dialTimeout() }
+func (c Config) EffectiveCheckPath() string                      { return c.checkPath() }
+func (c Config) EffectiveDeregisterCriticalAfter() time.Duration { return c.deregisterCriticalAfter() }
+func (c Config) EffectiveConsulCheckType() (string, error)       { return c.consulCheckType() }
+func (c Config) EffectiveRegistryType() string                   { return c.registryType() }
+
+// New creates a registry using the factory registered for Config.Type.
+// Concrete backends are optional contrib modules and must be registered by
+// the application before calling New.
 func New(cfg Config) (Registry, error) {
 	name := cfg.registryType()
 	factoryMu.RLock()
@@ -669,6 +696,10 @@ func localIP() string {
 	return "127.0.0.1"
 }
 
+// LocalIP returns a non-loopback IPv4 address, or 127.0.0.1 as fallback.
+// It is exported for optional registry adapters.
+func LocalIP() string { return localIP() }
+
 // GenerateInstanceID creates a unique instance ID from hostname + pid + timestamp.
 func GenerateInstanceID(name string) string {
 	host, _ := os.Hostname()
@@ -702,6 +733,53 @@ func validateService(svc Service) error {
 		}
 	}
 	return nil
+}
+
+// The following helpers are exported for optional registry adapters.
+func ValidateService(svc Service) error                 { return validateService(svc) }
+func ValidateServiceName(name string) error             { return validateServiceName(name) }
+func ServiceKey(prefix, name, instanceID string) string { return serviceKey(prefix, name, instanceID) }
+func ServicePrefixKey(prefix, name string) string       { return servicePrefixKey(prefix, name) }
+func MarshalService(svc Service) (string, error)        { return marshalService(svc) }
+func UnmarshalService(data []byte) (Service, error)     { return unmarshalService(data) }
+func ServiceInstanceFromKey(prefix string, key []byte) (string, bool) {
+	return serviceInstanceFromKey(prefix, key)
+}
+func SendEvent(ctx context.Context, ch chan<- Event, event Event) bool {
+	return sendEvent(ctx, ch, event)
+}
+func WaitForContext(ctx context.Context, d time.Duration) bool { return waitForContext(ctx, d) }
+
+func serviceInstanceFromKey(prefix string, key []byte) (string, bool) {
+	keyString := string(key)
+	if prefix == "" || !strings.HasPrefix(keyString, prefix) {
+		return "", false
+	}
+	instanceID := strings.TrimPrefix(keyString, prefix)
+	if instanceID == "" || strings.Contains(instanceID, "/") || strings.ContainsAny(instanceID, "\r\n\x00") || len(instanceID) > 256 {
+		return "", false
+	}
+	return instanceID, true
+}
+
+func sendEvent(ctx context.Context, ch chan<- Event, event Event) bool {
+	select {
+	case ch <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func waitForContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func validateServiceName(name string) error {

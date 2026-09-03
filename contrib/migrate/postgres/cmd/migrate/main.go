@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/baowk/dilu-go-kit/migratex"
+	"github.com/baowk/dilu-go-kit/contrib/migrate/postgres"
 )
 
 func main() {
@@ -19,20 +19,20 @@ func main() {
 	}
 	switch cmd {
 	case "create":
-		up, down, err := migratex.Create(opts.dir, opts.name)
+		up, down, err := postgres.Create(opts.dir, opts.name)
 		must(err)
 		fmt.Println(up)
 		fmt.Println(down)
 	case "up":
-		must(migratex.Up(opts.dsn, opts.dir))
+		must(postgres.Up(opts.dsn, opts.dir))
 	case "down":
-		must(migratex.Down(opts.dsn, opts.dir, opts.steps))
+		must(postgres.Down(opts.dsn, opts.dir, opts.steps))
 	case "version":
-		v, dirty, err := migratex.Version(opts.dsn, opts.dir)
+		v, dirty, err := postgres.Version(opts.dsn, opts.dir)
 		must(err)
 		fmt.Printf("version=%d dirty=%v\n", v, dirty)
 	case "force":
-		must(migratex.Force(opts.dsn, opts.dir, opts.version))
+		must(postgres.Force(opts.dsn, opts.dir, opts.version))
 	}
 }
 

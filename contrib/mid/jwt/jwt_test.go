@@ -1,4 +1,4 @@
-package mid
+package jwtmid
 
 import (
 	"encoding/json"
@@ -251,7 +251,7 @@ func TestJWTTrustsTenantShopAndScopesHeadersWhenUIDTrusted(t *testing.T) {
 	}
 }
 
-func TestIdentityGettersDoNotTrustRequestHeaders(t *testing.T) {
+func TestIdentityGettersDoNotTrustUntrustedHeaders(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	r := gin.New()

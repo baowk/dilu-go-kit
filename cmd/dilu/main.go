@@ -201,7 +201,7 @@ func serviceFiles(name, module string) map[string]string {
 	goPackage := strings.ReplaceAll(name, "-", "_")
 	serviceType := pascalName(name)
 	return map[string]string{
-		"go.mod": fmt.Sprintf("module %s\n\ngo 1.27.0\n\nrequire github.com/baowk/dilu-go-kit v0.13.0\n", module),
+		"go.mod": fmt.Sprintf("module %s\n\ngo 1.27.0\n\nrequire github.com/baowk/dilu-go-kit v0.15.0\n", module),
 		"api/" + goPackage + "/v1/" + goPackage + ".proto": fmt.Sprintf(`syntax = "proto3";
 
 package %s.v1;
