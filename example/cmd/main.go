@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/baowk/dilu-go-kit/boot"
+	"github.com/baowk/dilu-go-kit/buildinfo"
 	jwtmid "github.com/baowk/dilu-go-kit/contrib/mid/jwt"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/router"
 	"github.com/baowk/dilu-go-kit/example/internal/demo/store"
@@ -16,6 +17,12 @@ import (
 )
 
 func main() {
+	if handled, err := buildinfo.PrintVersion(); err != nil {
+		log.Fatal(err)
+	} else if handled {
+		return
+	}
+
 	app, err := boot.New("resources/config.dev.yaml")
 	if err != nil {
 		log.Fatal(err)

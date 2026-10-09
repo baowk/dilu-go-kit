@@ -6,6 +6,7 @@ Go 微服务基础工具包。提供统一的服务启动、日志、中间件�
 
 - **boot** — 一行启动服务（Config + DB + Redis + gRPC + 注册 + 远程配置 + 优雅关闭）
 - **boot.Component** — 统一后台任务启动、停止和反向关闭
+- **buildinfo** — 构建元数据、启动前 `--version` 输出和可选 HTTP 查询
 - **log** — 统一日志接口（slog 实现，traceId 自动注入，支持 console/file/both 输出）
 - **mid** — 核心中间件（Trace + Recovery + Logger + ErrorHandler + CORS + RateLimit）
 - **contrib/mid/jwt** — 可选 JWT 认证中间件（按需引入）
@@ -79,6 +80,40 @@ reg, err := registry.New(registry.Config{Type: "etcd", Endpoints: []string{"127.
 远程配置还可注入 `registry.KVStore`；自定义注册中心只要提供 `Get`/`WatchKey`，就能复用
 `boot.LoadRemoteConfigFromStore` 和 `boot.WatchRemoteConfigFromStore`，无需再为该后端修改 `boot`。
 服务级与节点级配置合并可使用 `boot.MergeRemoteConfigFromStore`。
+
+## 应用构建信息
+
+`buildinfo` 记录应用的仓库、tag、commit、构建时间和组件名，不代表 kit 的依赖版本。
+在 `main` 的最开始处理版本查询，示例见 [`example/cmd/main.go`](example/cmd/main.go)：
+
+```go
+if handled, err := buildinfo.PrintVersion(); err != nil {
+    log.Fatal(err)
+} else if handled {
+    return
+}
+```
+
+只有单独传入 `--version` 时输出一行 JSON 并退出，不需要配置文件、数据库或注册中心。
+未注入时 tag 为 `dev`，其余字段为 `unknown`。构建流水线应通过 linker 注入应用信息：
+
+```bash
+go build -ldflags "\
+  -X github.com/baowk/dilu-go-kit/buildinfo.Repository=my-service \
+  -X github.com/baowk/dilu-go-kit/buildinfo.Tag=v1.2.3 \
+  -X github.com/baowk/dilu-go-kit/buildinfo.Commit=$(git rev-parse HEAD) \
+  -X github.com/baowk/dilu-go-kit/buildinfo.BuiltAt=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  -X github.com/baowk/dilu-go-kit/buildinfo.Component=api" -o app ./cmd
+./app --version
+```
+
+`buildinfo.Current()` 返回元数据副本，可用于启动日志、注册信息或 telemetry；这些接入由
+应用显式选择，kit 不自动覆盖 `server.version`。变量仅供构建时注入，不应在运行时修改。
+如需 HTTP 查询，可用 `mux.Handle("/version", buildinfo.Handler())`；Gin 可用
+`gin.WrapH(buildinfo.Handler())` 分别注册 GET 和 HEAD。接口返回相同 JSON，禁止缓存，
+只接受 GET/HEAD；路由和访问权限由应用决定，kit 不自动开放接口。
+
+tag 与 commit 的一致性检查、制品校验、发布记录和回滚仍由应用发布流水线负责。
 
 ## AI 友好的契约和脚手架
 
